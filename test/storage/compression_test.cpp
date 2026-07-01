@@ -9,6 +9,7 @@
 #include "common/serializer/serializer.h"
 #include "gmock/gmock-matchers.h"
 #include "gtest/gtest.h"
+#include "storage/compression/bitpacking_int128.h"
 #include "storage/compression/compression.h"
 #include "storage/storage_utils.h"
 #include "storage/table/column_chunk_metadata.h"
@@ -347,6 +348,33 @@ TEST(CompressionTests, IntegerPackingTest128SignBitFillingDoesNotBreakUnpacking)
     test_compression(alg, src, false);
 }
 
+static void testInt128OldBitpackingPageCanBeRead(const std::vector<int128_t>& src) {
+    ASSERT_EQ(src.size(), IntegerBitpacking<int128_t>::CHUNK_SIZE);
+    const auto& [min, max] = std::minmax_element(src.begin(), src.end());
+    const auto metadata = CompressionMetadata(StorageValue(*min), StorageValue(*max),
+        CompressionType::INTEGER_BITPACKING);
+    const auto info = IntegerBitpacking<int128_t>::getPackingInfo(metadata);
+    ASSERT_GT(info.bitWidth, 0);
+    ASSERT_LT(info.bitWidth, sizeof(int128_t) * 8);
+
+    std::vector<int128_t> oldPackedDeltas(src.size());
+    for (auto i = 0u; i < src.size(); i++) {
+        oldPackedDeltas[i] = info.offset == 0 ? src[i] : src[i] - info.offset;
+    }
+
+    std::vector<uint8_t> page(LBUG_PAGE_SIZE, 0);
+    Int128Packer::pack(oldPackedDeltas.data(), reinterpret_cast<uint32_t*>(page.data()),
+        info.bitWidth);
+
+    auto alg = IntegerBitpacking<int128_t>();
+    std::vector<int128_t> decompressed(src.size());
+    alg.decompressFromPage(page.data(), 0 /* srcOffset */,
+        reinterpret_cast<uint8_t*>(decompressed.data()), 0 /* dstOffset */, decompressed.size(),
+        metadata);
+
+    EXPECT_THAT(decompressed, ::testing::ContainerEq(src));
+}
+
 TEST(CompressionTests, IntegerPackingTest128Negative) {
     std::vector<lbug::common::int128_t> src(101);
 
@@ -369,6 +397,42 @@ TEST(CompressionTests, IntegerPackingTest128NegativeSimple) {
 
     auto alg = IntegerBitpacking<lbug::common::int128_t>();
     test_compression(alg, src, false);
+}
+
+TEST(CompressionTests, IntegerPackingTest128BackwardCompatOldPositiveOffset) {
+    // Simulate an old persisted INTEGER_BITPACKING page with positive
+    // frame-of-reference encoding. The new writer may choose differently for some
+    // edge ranges, but old valid bitpacked pages must remain readable.
+    std::vector<int128_t> src(IntegerBitpacking<int128_t>::CHUNK_SIZE);
+    for (auto i = 0u; i < src.size(); i++) {
+        src[i] = int128_t{1000 + static_cast<uint32_t>(i)};
+    }
+
+    const auto metadata = CompressionMetadata(StorageValue(src.front()), StorageValue(src.back()),
+        CompressionType::INTEGER_BITPACKING);
+    const auto info = IntegerBitpacking<int128_t>::getPackingInfo(metadata);
+    ASSERT_FALSE(info.hasNegative);
+    ASSERT_EQ(info.offset, int128_t{1000});
+
+    testInt128OldBitpackingPageCanBeRead(src);
+}
+
+TEST(CompressionTests, IntegerPackingTest128BackwardCompatOldNegativeSignExtend) {
+    // Simulate an old persisted INTEGER_BITPACKING page using the signed/negative
+    // path. This covers sign extension during read. We are not checking
+    // INT128_MIN itself because old code could not safely write that non-constant range.
+    std::vector<int128_t> src(IntegerBitpacking<int128_t>::CHUNK_SIZE);
+    for (auto i = 0u; i < src.size(); i++) {
+        src[i] = int128_t{-1024 + static_cast<int32_t>(i)};
+    }
+
+    const auto metadata = CompressionMetadata(StorageValue(src.front()), StorageValue(src.back()),
+        CompressionType::INTEGER_BITPACKING);
+    const auto info = IntegerBitpacking<int128_t>::getPackingInfo(metadata);
+    ASSERT_TRUE(info.hasNegative);
+    ASSERT_EQ(info.offset, int128_t{});
+
+    testInt128OldBitpackingPageCanBeRead(src);
 }
 
 TEST(CompressionTests, IntegerPackingTest128MinEdgeCase) {
