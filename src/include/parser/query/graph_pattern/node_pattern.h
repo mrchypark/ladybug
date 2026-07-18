@@ -50,7 +50,18 @@ public:
 
     inline std::vector<std::string> getTableNames() const { return tableNames; }
 
-    inline const std::vector<PatternLabel>& getTableNameInfos() const { return tableNameInfos; }
+    inline std::vector<PatternLabel> getTableNameInfos() const {
+        std::vector<PatternLabel> result;
+        result.reserve(tableNames.size());
+        for (auto i = 0u; i < tableNames.size(); ++i) {
+            if (i < tableNameInfos.size() && tableNameInfos[i].name == tableNames[i]) {
+                result.push_back(tableNameInfos[i]);
+            } else {
+                result.push_back({tableNames[i], {tableNames[i]}});
+            }
+        }
+        return result;
+    }
 
     inline const std::vector<s_parsed_expr_pair>& getPropertyKeyVals() const {
         return propertyKeyVals;

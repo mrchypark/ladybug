@@ -176,7 +176,7 @@ void PreparedStatementMetadataAnalyzer::visitPatternElements(
     const std::vector<PatternElement>& patternElements) {
     const auto visitNode = [this](const NodePattern& node) {
         addIdentifier(node.getVariableName());
-        const auto& labels = node.getTableNameInfos();
+        const auto labels = node.getTableNameInfos();
         metadata.unlabeledNodePattern |= labels.empty();
         for (const auto& label : labels) {
             metadata.nodeLabels.push_back(label.name);
@@ -197,7 +197,7 @@ void PreparedStatementMetadataAnalyzer::visitPatternElements(
             const auto chain = element.getPatternElementChain(i);
             const auto rel = chain->getRelPattern();
             addIdentifier(rel->getVariableName());
-            const auto& labels = rel->getTableNameInfos();
+            const auto labels = rel->getTableNameInfos();
             metadata.unlabeledRelPattern |= labels.empty();
             for (const auto& label : labels) {
                 metadata.relLabels.push_back(label.name);

@@ -30,6 +30,13 @@ void createPolicyTestSchema(lbug::main::Connection& connection) {
     ASSERT_TRUE(result->isSuccess()) << result->getErrorMessage();
 }
 
+class LegacyNodePatternSubclass final : public lbug::parser::NodePattern {
+public:
+    using NodePattern::NodePattern;
+
+    void replaceTableNames(std::vector<std::string> names) { tableNames = std::move(names); }
+};
+
 } // namespace
 
 TEST_F(ApiTest, ParserPatternLegacyEmptyBraceConstructionIsUnambiguous) {
@@ -39,6 +46,13 @@ TEST_F(ApiTest, ParserPatternLegacyEmptyBraceConstructionIsUnambiguous) {
 
     EXPECT_TRUE(node.getTableNames().empty());
     EXPECT_TRUE(rel.getTableNames().empty());
+
+    LegacyNodePatternSubclass subclass{"n", {"before"}, {}};
+    subclass.replaceTableNames({"after"});
+    const auto labelInfos = subclass.getTableNameInfos();
+    ASSERT_EQ(labelInfos.size(), 1);
+    EXPECT_EQ(labelInfos[0].name, "after");
+    EXPECT_EQ(labelInfos[0].components, std::vector<std::string>{"after"});
 }
 
 TEST_F(ApiTest, PreparedStatementMetadataUsesDecodedParsedNames) {
