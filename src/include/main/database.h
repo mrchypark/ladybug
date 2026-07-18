@@ -120,6 +120,18 @@ public:
     LBUG_API explicit Database(std::string_view databasePath,
         SystemConfig systemConfig = SystemConfig());
     /**
+     * @brief Creates a database using the provided primary filesystem from the start of storage
+     *        initialization and recovery. databasePath still passes through the existing
+     *        host-local path normalization and directory preflight; after that, the database and
+     *        its sidecars use the provided filesystem, whose ownership is transferred here.
+     *        It is also the default for other paths not claimed by a registered filesystem.
+     * @param primaryFileSystem Filesystem satisfying the full FileSystem contract for every path
+     *        it handles, including concurrent access, positional I/O, durable syncFile, and
+     *        same-namespace renameFile semantics.
+     */
+    LBUG_API Database(std::string_view databasePath, SystemConfig systemConfig,
+        std::unique_ptr<common::FileSystem> primaryFileSystem);
+    /**
      * @brief Destructs the database object.
      */
     LBUG_API ~Database();
@@ -184,7 +196,8 @@ private:
     };
 
     static std::unique_ptr<storage::BufferManager> initBufferManager(const Database& db);
-    void initMembers(std::string_view dbPath, construct_bm_func_t initBmFunc);
+    void initMembers(std::string_view dbPath, construct_bm_func_t initBmFunc,
+        std::unique_ptr<common::FileSystem> primaryFileSystem = nullptr);
 
     // factory method only to be used for tests
     Database(std::string_view databasePath, SystemConfig systemConfig,

@@ -23,6 +23,7 @@ class LBUG_API VirtualFileSystem final : public FileSystem {
 public:
     VirtualFileSystem();
     explicit VirtualFileSystem(std::string homeDir);
+    VirtualFileSystem(std::string databasePath, std::unique_ptr<FileSystem> primaryFileSystem);
 
     ~VirtualFileSystem() override;
 
@@ -75,6 +76,7 @@ protected:
 
 private:
     FileSystem* findFileSystem(const std::string& path) const;
+    bool isInPrimaryDatabaseNamespace(const std::string& path) const;
 
     static FileCompressionType autoDetectCompressionType(const std::string& path);
 

@@ -89,6 +89,15 @@ Database::Database(std::string_view databasePath, SystemConfig systemConfig)
     : Database(databasePath, systemConfig, initBufferManager) {}
 
 Database::Database(std::string_view databasePath, SystemConfig systemConfig,
+    std::unique_ptr<FileSystem> primaryFileSystem)
+    : dbConfig{std::make_unique<DBConfig>(systemConfig)} {
+    if (!primaryFileSystem) {
+        throw RuntimeException("The primary filesystem cannot be null.");
+    }
+    initMembers(databasePath, initBufferManager, std::move(primaryFileSystem));
+}
+
+Database::Database(std::string_view databasePath, SystemConfig systemConfig,
     construct_bm_func_t constructBMFunc)
     : dbConfig{std::make_unique<DBConfig>(systemConfig)} {
     initMembers(databasePath, constructBMFunc);
@@ -100,7 +109,8 @@ std::unique_ptr<BufferManager> Database::initBufferManager(const Database& db) {
         db.dbConfig->maxDBSize, db.vfs.get(), db.dbConfig->readOnly);
 }
 
-void Database::initMembers(std::string_view dbPath, construct_bm_func_t initBmFunc) {
+void Database::initMembers(std::string_view dbPath, construct_bm_func_t initBmFunc,
+    std::unique_ptr<FileSystem> primaryFileSystem) {
     // To expand a path with home directory(~), we have to pass in a dummy clientContext which
     // handles the home directory expansion.
     const auto dbPathStr = std::string(dbPath);
@@ -111,7 +121,9 @@ void Database::initMembers(std::string_view dbPath, construct_bm_func_t initBmFu
     if (std::filesystem::is_directory(databasePath)) {
         throw RuntimeException("Database path cannot be a directory: " + databasePath);
     }
-    vfs = std::make_unique<VirtualFileSystem>(databasePath);
+    vfs = primaryFileSystem ?
+              std::make_unique<VirtualFileSystem>(databasePath, std::move(primaryFileSystem)) :
+              std::make_unique<VirtualFileSystem>(databasePath);
     validatePathInReadOnly();
 
     bufferManager = initBmFunc(*this);

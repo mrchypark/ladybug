@@ -1,12 +1,97 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <vector>
 
 #include "common/exception/io.h"
+#include "common/exception/runtime.h"
 #include "common/file_system/virtual_file_system.h"
 #include "gtest/gtest.h"
+#include "storage/storage_utils.h"
 
 using namespace lbug::common;
+
+class RoutingFileSystem final : public FileSystem {
+public:
+    explicit RoutingFileSystem(bool claimAll) : claimAll{claimAll} {}
+
+    bool canHandleFile(const std::string_view /*path*/) const override { return claimAll; }
+
+    bool fileOrPathExists(const std::string& path,
+        lbug::main::ClientContext* /*context*/ = nullptr) override {
+        observedPaths.push_back(path);
+        return true;
+    }
+
+    void syncFile(const FileInfo& /*fileInfo*/) const override {}
+
+    std::vector<std::string> observedPaths;
+
+protected:
+    void readFromFile(FileInfo& /*fileInfo*/, void* /*buffer*/, uint64_t /*numBytes*/,
+        uint64_t /*position*/) const override {
+        UNREACHABLE_CODE;
+    }
+    int64_t readFile(FileInfo& /*fileInfo*/, void* /*buf*/, size_t /*numBytes*/) const override {
+        UNREACHABLE_CODE;
+    }
+    int64_t seek(FileInfo& /*fileInfo*/, uint64_t /*offset*/, int /*whence*/) const override {
+        UNREACHABLE_CODE;
+    }
+    uint64_t getFileSize(const FileInfo& /*fileInfo*/) const override { UNREACHABLE_CODE; }
+
+private:
+    bool claimAll;
+};
+
+TEST(VFSTests, InjectedPrimaryRejectsNullFileSystem) {
+    EXPECT_THROW(VirtualFileSystem("/tmp/null-primary.db", std::unique_ptr<FileSystem>{}),
+        RuntimeException);
+}
+
+TEST(VFSTests, InjectedPrimaryDatabaseNamespacePrecedesRegisteredSubsystems) {
+    const std::string databasePath = "/tmp/injected-primary.db";
+    const auto graphPath = lbug::storage::StorageUtils::getGraphPath(databasePath, "analytics");
+    const std::string otherParentGraphPath = "/var/tmp/injected-primary.analytics.db";
+    const std::string nearPrefixPath = "/tmp/injected-primary.analytics.dbx";
+    auto primary = std::make_unique<RoutingFileSystem>(false);
+    auto* primaryPtr = primary.get();
+    VirtualFileSystem vfs{databasePath, std::move(primary)};
+    auto claimAll = std::make_unique<RoutingFileSystem>(true);
+    auto* claimAllPtr = claimAll.get();
+    vfs.registerFileSystem(std::move(claimAll));
+
+    EXPECT_TRUE(vfs.fileOrPathExists(databasePath));
+    EXPECT_TRUE(vfs.fileOrPathExists(databasePath + ".wal"));
+    EXPECT_TRUE(vfs.fileOrPathExists(graphPath));
+    EXPECT_TRUE(vfs.fileOrPathExists(graphPath + ".wal"));
+    EXPECT_TRUE(vfs.fileOrPathExists(otherParentGraphPath));
+    EXPECT_TRUE(vfs.fileOrPathExists(nearPrefixPath));
+    EXPECT_TRUE(vfs.fileOrPathExists("/tmp/import.csv"));
+
+    EXPECT_EQ(primaryPtr->observedPaths,
+        (std::vector<std::string>{databasePath, databasePath + ".wal", graphPath,
+            graphPath + ".wal"}));
+    EXPECT_EQ(claimAllPtr->observedPaths,
+        (std::vector<std::string>{otherParentGraphPath, nearPrefixPath, "/tmp/import.csv"}));
+}
+
+TEST(VFSTests, InjectedPrimaryInMemoryNamespacePrecedesRegisteredSubsystems) {
+    auto primary = std::make_unique<RoutingFileSystem>(false);
+    auto* primaryPtr = primary.get();
+    VirtualFileSystem vfs{":memory:", std::move(primary)};
+    auto claimAll = std::make_unique<RoutingFileSystem>(true);
+    auto* claimAllPtr = claimAll.get();
+    vfs.registerFileSystem(std::move(claimAll));
+
+    EXPECT_TRUE(vfs.fileOrPathExists(":analytics"));
+    EXPECT_TRUE(vfs.fileOrPathExists(":analytics.wal"));
+    EXPECT_TRUE(vfs.fileOrPathExists("/tmp/import.csv"));
+
+    EXPECT_EQ(primaryPtr->observedPaths,
+        (std::vector<std::string>{":analytics", ":analytics.wal"}));
+    EXPECT_EQ(claimAllPtr->observedPaths, (std::vector<std::string>{"/tmp/import.csv"}));
+}
 
 TEST(VFSTests, VirtualFileSystemDeleteFiles) {
     std::string homeDir = "/tmp/dbHome";
