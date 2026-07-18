@@ -164,7 +164,7 @@ void WALReplayer::replayFrozenWAL(Checkpointer& checkpointer, bool throwOnWalRep
             throwIfReadOnlyCheckpointState(clientContext, true /* hasFrozenWAL */, shadowFilePath);
             ShadowFile::replayShadowPageRecords(clientContext);
             removeFileIfExists(checkpointWalPath);
-            removeFileIfExists(walPath);
+            // Preserve commits written to the active WAL after the checkpoint WAL was frozen.
             removeFileIfExists(shadowFilePath);
             checkpointer.readCheckpoint();
         } else {

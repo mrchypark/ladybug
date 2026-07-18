@@ -229,6 +229,87 @@ TEST_F(FlakyCheckpointerTest, RecoverFromCheckpointClearingFilesFailure) {
     runTest(flakyCheckpointer);
 }
 
+class CheckpointerFailsAfterConcurrentWrite final : public Checkpointer {
+public:
+    CheckpointerFailsAfterConcurrentWrite(main::ClientContext& clientContext,
+        std::promise<void>& checkpointReady, std::shared_future<void> activeWriteCommitted)
+        : Checkpointer(clientContext), checkpointReady{checkpointReady},
+          activeWriteCommitted{std::move(activeWriteCommitted)} {}
+
+    bool checkpointStorage() override {
+        const auto hasChanges = Checkpointer::checkpointStorage();
+        checkpointReady.set_value();
+        activeWriteCommitted.wait();
+        return hasChanges;
+    }
+
+    void logCheckpointAndApplyShadowPages(bool walRotated) override {
+        const auto storageManager = mainStorageManager;
+        auto& shadowFile = storageManager->getShadowFile();
+        shadowFile.flushAll(clientContext);
+        auto wal = WAL::Get(clientContext);
+        ASSERT_TRUE(walRotated);
+        wal->logAndFlushCheckpointToFrozen(&clientContext);
+        shadowFile.applyShadowPages(*storageManager, clientContext);
+        throw RuntimeException("checkpoint failed after concurrent write");
+    }
+
+private:
+    std::promise<void>& checkpointReady;
+    std::shared_future<void> activeWriteCommitted;
+};
+
+TEST_F(FlakyCheckpointerTest, RecoveryReplaysActiveWALCommittedAfterFrozenCheckpoint) {
+    if (inMemMode || systemConfig->checkpointThreshold == 0) {
+        GTEST_SKIP();
+    }
+    conn->query("CALL force_checkpoint_on_close=false;");
+    conn->query("CALL auto_checkpoint=false;");
+    ASSERT_TRUE(conn->query("CREATE NODE TABLE test(id INT64 PRIMARY KEY);")->isSuccess());
+    ASSERT_TRUE(conn->query("CREATE (:test {id: 1});")->isSuccess());
+
+    std::promise<void> checkpointReady;
+    auto checkpointReadyFuture = checkpointReady.get_future();
+    std::promise<void> activeWriteCommitted;
+    auto activeWriteCommittedFuture = activeWriteCommitted.get_future().share();
+    auto initFlakyCheckpointer = [&](main::ClientContext& context) {
+        return std::make_unique<CheckpointerFailsAfterConcurrentWrite>(
+            context, checkpointReady, activeWriteCommittedFuture);
+    };
+    FlakyCheckpointer flakyCheckpointer(initFlakyCheckpointer);
+    flakyCheckpointer.setCheckpointer(*getClientContext(*conn));
+
+    std::promise<bool> checkpointFailed;
+    auto checkpointFailedFuture = checkpointFailed.get_future();
+    std::thread checkpointThread([&]() {
+        auto result = conn->query("CHECKPOINT;");
+        checkpointFailed.set_value(!result->isSuccess());
+    });
+
+    checkpointReadyFuture.wait();
+    auto conn2 = std::make_unique<main::Connection>(database.get());
+    auto activeWrite = conn2->query("CREATE (:test {id: 2});");
+    const auto activeWriteSucceeded = activeWrite->isSuccess();
+    const auto activeWriteError = activeWrite->getErrorMessage();
+    activeWriteCommitted.set_value();
+
+    const auto didCheckpointFail = checkpointFailedFuture.get();
+    checkpointThread.join();
+    ASSERT_TRUE(activeWriteSucceeded) << activeWriteError;
+    ASSERT_TRUE(didCheckpointFail);
+    const auto frozenWalPath = StorageUtils::getCheckpointWALFilePath(databasePath);
+    const auto activeWalPath = StorageUtils::getWALFilePath(databasePath);
+    ASSERT_TRUE(std::filesystem::exists(frozenWalPath));
+    ASSERT_TRUE(std::filesystem::exists(activeWalPath));
+
+    activeWrite.reset();
+    conn2.reset();
+    createDBAndConn();
+    auto result = conn->query("MATCH (n:test) RETURN count(n);");
+    ASSERT_TRUE(result->isSuccess()) << result->getErrorMessage();
+    EXPECT_EQ(result->getNext()->getValue(0)->getValue<int64_t>(), 2);
+}
+
 // Simulates a situation where a database attempts to replay a shadow file from an older database
 // with the same path
 TEST_F(FlakyCheckpointerTest, ShadowFileDatabaseIDMismatchExistingDB) {
