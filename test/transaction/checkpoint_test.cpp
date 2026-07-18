@@ -7,7 +7,10 @@
 #include <thread>
 
 #include "api_test/private_api_test.h"
+#include "common/exception/io.h"
 #include "common/exception/runtime.h"
+#include "common/file_system/local_file_system.h"
+#include "common/file_system/virtual_file_system.h"
 #include "storage/checkpointer.h"
 #include "storage/storage_manager.h"
 #include "storage/wal/wal.h"
@@ -60,6 +63,76 @@ public:
         ASSERT_TRUE(res->isSuccess());
         ASSERT_EQ(res->getNext()->getValue(0)->getValue<int64_t>(), 5000);
     }
+};
+
+struct SyncFailingProxyFileInfo final : FileInfo {
+    SyncFailingProxyFileInfo(std::string path, FileSystem* fileSystem,
+        std::unique_ptr<FileInfo> delegate)
+        : FileInfo{std::move(path), fileSystem}, delegate{std::move(delegate)} {}
+
+    std::unique_ptr<FileInfo> delegate;
+};
+
+class DataFileSyncFailingFileSystem final : public FileSystem {
+public:
+    DataFileSyncFailingFileSystem(std::string dataFilePath, std::string shadowFilePath)
+        : dataFilePath{std::move(dataFilePath)}, shadowFilePath{std::move(shadowFilePath)},
+          localFileSystem{""} {}
+
+    bool canHandleFile(const std::string_view path) const override {
+        return path == dataFilePath || path == shadowFilePath;
+    }
+
+    std::unique_ptr<FileInfo> openFile(const std::string& path, FileOpenFlags flags,
+        main::ClientContext* context = nullptr) override {
+        flags.lockType = FileLockType::NO_LOCK;
+        return std::make_unique<SyncFailingProxyFileInfo>(
+            path, this, localFileSystem.openFile(path, flags, context));
+    }
+
+    void syncFile(const FileInfo& fileInfo) const override {
+        if (fileInfo.path == dataFilePath) {
+            dataFileSyncCount++;
+            throw IOException{"Injected recovered data file sync failure."};
+        }
+        fileInfo.constCast<SyncFailingProxyFileInfo>().delegate->syncFile();
+    }
+
+    uint64_t getDataFileSyncCount() const { return dataFileSyncCount; }
+
+protected:
+    void readFromFile(FileInfo& fileInfo, void* buffer, uint64_t numBytes,
+        uint64_t position) const override {
+        fileInfo.cast<SyncFailingProxyFileInfo>().delegate->readFromFile(
+            buffer, numBytes, position);
+    }
+
+    int64_t readFile(FileInfo& fileInfo, void* buffer, size_t numBytes) const override {
+        return fileInfo.cast<SyncFailingProxyFileInfo>().delegate->readFile(buffer, numBytes);
+    }
+
+    void writeFile(FileInfo& fileInfo, const uint8_t* buffer, uint64_t numBytes,
+        uint64_t offset) const override {
+        fileInfo.cast<SyncFailingProxyFileInfo>().delegate->writeFile(buffer, numBytes, offset);
+    }
+
+    int64_t seek(FileInfo& fileInfo, uint64_t offset, int whence) const override {
+        return fileInfo.cast<SyncFailingProxyFileInfo>().delegate->seek(offset, whence);
+    }
+
+    void truncate(FileInfo& fileInfo, uint64_t size) const override {
+        fileInfo.cast<SyncFailingProxyFileInfo>().delegate->truncate(size);
+    }
+
+    uint64_t getFileSize(const FileInfo& fileInfo) const override {
+        return fileInfo.constCast<SyncFailingProxyFileInfo>().delegate->getFileSize();
+    }
+
+private:
+    std::string dataFilePath;
+    std::string shadowFilePath;
+    LocalFileSystem localFileSystem;
+    mutable uint64_t dataFileSyncCount = 0;
 };
 
 class FlakyCheckpointerFailsOnCheckpointStorage final : public Checkpointer {
@@ -196,6 +269,36 @@ TEST_F(FlakyCheckpointerTest, RecoverFromCheckpointApplyingShadowFailure) {
     };
     FlakyCheckpointer flakyCheckpointer(initFlakyCheckpointer);
     runTest(flakyCheckpointer);
+}
+
+TEST_F(FlakyCheckpointerTest, ShadowReplayReportsDataFileSyncFailure) {
+    if (inMemMode || systemConfig->checkpointThreshold == 0) {
+        GTEST_SKIP();
+    }
+    conn->query("CALL force_checkpoint_on_close=false;");
+    conn->query("CALL auto_checkpoint=false;");
+    ASSERT_TRUE(conn->query("CREATE NODE TABLE test(id INT64 PRIMARY KEY);")->isSuccess());
+    ASSERT_TRUE(conn->query("CREATE (:test {id: 1});")->isSuccess());
+    ASSERT_TRUE(conn->query("CHECKPOINT;")->isSuccess());
+    ASSERT_TRUE(conn->query("CREATE (:test {id: 2});")->isSuccess());
+
+    auto initFlakyCheckpointer = [](main::ClientContext& context) {
+        return std::make_unique<FlakyCheckpointerFailsOnApplyingShadow>(context);
+    };
+    FlakyCheckpointer flakyCheckpointer(initFlakyCheckpointer);
+    flakyCheckpointer.setCheckpointer(*getClientContext(*conn));
+    auto checkpoint = conn->query("CHECKPOINT;");
+    ASSERT_FALSE(checkpoint->isSuccess());
+
+    auto shadowFilePath = StorageUtils::getShadowFilePath(databasePath);
+    ASSERT_TRUE(std::filesystem::exists(shadowFilePath));
+    auto failingFileSystem =
+        std::make_unique<DataFileSyncFailingFileSystem>(databasePath, shadowFilePath);
+    auto failingFileSystemPtr = failingFileSystem.get();
+    getFileSystem(*database)->registerFileSystem(std::move(failingFileSystem));
+
+    EXPECT_THROW(ShadowFile::replayShadowPageRecords(*getClientContext(*conn)), IOException);
+    EXPECT_EQ(failingFileSystemPtr->getDataFileSyncCount(), 1);
 }
 
 class FlakyCheckpointerFailsOnClearingFiles final : public Checkpointer {
