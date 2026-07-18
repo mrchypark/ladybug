@@ -1,5 +1,6 @@
 #pragma once
 
+#include <limits>
 #include <type_traits>
 
 #include "common/types/int128_t.h"
@@ -69,6 +70,24 @@ constexpr int bitWidth<int128_t>(int128_t x) {
         return sizeof(x.low) * BITS_PER_BYTE + std::bit_width(makeValueUnSigned(x.high));
     }
     return std::bit_width(x.low);
+}
+
+template<std::unsigned_integral T>
+constexpr bool tryAdd(T left, T right, T& result) {
+    if (right > std::numeric_limits<T>::max() - left) {
+        return false;
+    }
+    result = left + right;
+    return true;
+}
+
+template<std::unsigned_integral T>
+constexpr bool tryMultiply(T left, T right, T& result) {
+    if (left != 0 && right > std::numeric_limits<T>::max() / left) {
+        return false;
+    }
+    result = left * right;
+    return true;
 }
 } // namespace numeric_utils
 } // namespace common

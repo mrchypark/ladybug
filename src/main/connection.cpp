@@ -63,6 +63,15 @@ std::unique_ptr<QueryResult> Connection::query(std::string_view queryStatement) 
     return queryResult;
 }
 
+std::unique_ptr<QueryResult> Connection::query(std::string_view queryStatement,
+    uint64_t maxOutputRows) {
+    dbLifeCycleManager->checkDatabaseClosedOrThrow();
+    auto queryResult = clientContext->query(queryStatement, std::nullopt,
+        ClientContext::QueryConfig{maxOutputRows});
+    queryResult->setDBLifeCycleManager(dbLifeCycleManager);
+    return queryResult;
+}
+
 std::unique_ptr<QueryResult> Connection::queryAsArrow(std::string_view query, int64_t chunkSize) {
     dbLifeCycleManager->checkDatabaseClosedOrThrow();
     auto queryResult = clientContext->query(query, std::nullopt,
@@ -93,6 +102,16 @@ std::unique_ptr<QueryResult> Connection::executeWithParams(PreparedStatement* pr
     std::unordered_map<std::string, std::unique_ptr<Value>> inputParams) {
     dbLifeCycleManager->checkDatabaseClosedOrThrow();
     auto queryResult = clientContext->executeWithParams(preparedStatement, std::move(inputParams));
+    queryResult->setDBLifeCycleManager(dbLifeCycleManager);
+    return queryResult;
+}
+
+std::unique_ptr<QueryResult> Connection::executeWithParams(PreparedStatement* preparedStatement,
+    std::unordered_map<std::string, std::unique_ptr<Value>> inputParams,
+    uint64_t maxOutputRows) {
+    dbLifeCycleManager->checkDatabaseClosedOrThrow();
+    auto queryResult = clientContext->executeWithParams(preparedStatement, std::move(inputParams),
+        std::nullopt, ClientContext::QueryConfig{maxOutputRows});
     queryResult->setDBLifeCycleManager(dbLifeCycleManager);
     return queryResult;
 }

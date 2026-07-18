@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cstdint>
+#include <optional>
+
 #include "common/task_system/task_scheduler.h"
 
 namespace lbug {
@@ -22,7 +25,7 @@ public:
     common::TaskScheduler* getTaskScheduler() { return taskScheduler.get(); }
 
     std::unique_ptr<main::QueryResult> execute(PhysicalPlan* physicalPlan,
-        ExecutionContext* context);
+        ExecutionContext* context, std::optional<uint64_t> maxOutputRows = std::nullopt);
 
 private:
     void decomposePlanIntoTask(PhysicalOperator* op, common::Task* task, ExecutionContext* context);

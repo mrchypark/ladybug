@@ -24,7 +24,7 @@ PlanMapper::PlanMapper(ExecutionContext* executionContext)
 
 std::unique_ptr<PhysicalPlan> PlanMapper::getPhysicalPlan(const LogicalPlan* logicalPlan,
     const expression_vector& expressions, main::QueryResultType resultType,
-    ArrowResultConfig arrowConfig) {
+    ArrowResultConfig arrowConfig, std::optional<uint64_t> maxOutputRows) {
     auto root = mapOperator(logicalPlan->getLastOperator().get());
     if (!root->isSink()) {
         if (resultType == main::QueryResultType::ARROW) {
@@ -42,7 +42,7 @@ std::unique_ptr<PhysicalPlan> PlanMapper::getPhysicalPlan(const LogicalPlan* log
                 std::move(root), orderPreservation);
         } else {
             root = createResultCollector(AccumulateType::REGULAR, expressions,
-                logicalPlan->getSchema(), std::move(root));
+                logicalPlan->getSchema(), std::move(root), maxOutputRows);
         }
     }
     auto physicalPlan = std::make_unique<PhysicalPlan>(std::move(root));

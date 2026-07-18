@@ -49,6 +49,10 @@ StatementType PreparedStatement::getStatementType() const {
     return preparedSummary.statementType;
 }
 
+const PreparedStatementMetadata& PreparedStatement::getMetadata() const {
+    return metadata;
+}
+
 bool PreparedStatement::canReuseCachedPlanWith(
     const std::unordered_map<std::string, std::unique_ptr<Value>>& inputParams) const {
     if (!unknownParameters.empty()) {

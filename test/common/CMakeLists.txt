@@ -6,6 +6,7 @@ add_lbug_test(types_test
         extension_ca_cert_test.cpp
         interval_test.cpp
         null_mask_test.cpp
+        numeric_utils_test.cpp
         string_test.cpp
         time_test.cpp
         timestamp_test.cpp

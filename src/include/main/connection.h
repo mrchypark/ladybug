@@ -47,6 +47,8 @@ public:
      */
     LBUG_API std::unique_ptr<QueryResult> query(std::string_view query);
 
+    LBUG_API std::unique_ptr<QueryResult> query(std::string_view query, uint64_t maxOutputRows);
+
     LBUG_API std::unique_ptr<QueryResult> queryAsArrow(std::string_view query, int64_t chunkSize);
 
     /**
@@ -90,6 +92,9 @@ public:
      */
     LBUG_API std::unique_ptr<QueryResult> executeWithParams(PreparedStatement* preparedStatement,
         std::unordered_map<std::string, std::unique_ptr<common::Value>> inputParams);
+    LBUG_API std::unique_ptr<QueryResult> executeWithParams(PreparedStatement* preparedStatement,
+        std::unordered_map<std::string, std::unique_ptr<common::Value>> inputParams,
+        uint64_t maxOutputRows);
     /**
      * @brief interrupts all queries currently executing within this connection.
      */

@@ -1,11 +1,14 @@
 #pragma once
 
+#define LBUG_QUERY_METADATA_ABI_VERSION 1
+
 #include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "common/api.h"
+#include "common/enums/statement_type.h"
 #include "common/types/value/value.h"
 #include "query_summary.h"
 
@@ -24,6 +27,49 @@ class LogicalPlan;
 }
 
 namespace main {
+
+class PreparedStatementMetadataAnalyzer;
+
+class LBUG_API PreparedStatementMetadata {
+    friend class ClientContext;
+    friend class PreparedStatementMetadataAnalyzer;
+
+public:
+    const std::vector<std::string>& getParameterNames() const { return parameterNames; }
+    const std::vector<std::string>& getIdentifiers() const { return identifiers; }
+    const std::vector<std::string>& getNodeLabels() const { return nodeLabels; }
+    const std::vector<std::string>& getRelLabels() const { return relLabels; }
+
+    bool hasUnlabeledNodePattern() const { return unlabeledNodePattern; }
+    bool hasUnlabeledRelPattern() const { return unlabeledRelPattern; }
+    bool hasUnion() const { return union_; }
+    bool hasUnionAll() const { return unionAll; }
+    bool hasOptionalMatch() const { return optionalMatch; }
+    bool hasUnwind() const { return unwind; }
+    bool hasLoadFrom() const { return loadFrom; }
+    bool hasInQueryCall() const { return inQueryCall; }
+    bool hasRecursiveRelPattern() const { return recursiveRelPattern; }
+
+    common::StatementType getStatementType() const { return statementType; }
+    bool isReadOnly() const { return readOnly; }
+
+private:
+    std::vector<std::string> parameterNames;
+    std::vector<std::string> identifiers;
+    std::vector<std::string> nodeLabels;
+    std::vector<std::string> relLabels;
+    bool unlabeledNodePattern = false;
+    bool unlabeledRelPattern = false;
+    bool union_ = false;
+    bool unionAll = false;
+    bool optionalMatch = false;
+    bool unwind = false;
+    bool loadFrom = false;
+    bool inQueryCall = false;
+    bool recursiveRelPattern = false;
+    common::StatementType statementType = common::StatementType::QUERY;
+    bool readOnly = true;
+};
 
 // Prepared statement cached in client context and NEVER serialized to client side.
 struct CachedPreparedStatement {
@@ -75,7 +121,9 @@ public:
 
     std::string getName() const { return cachedPreparedStatementName; }
 
-    common::StatementType getStatementType() const;
+    LBUG_API common::StatementType getStatementType() const;
+
+    LBUG_API const PreparedStatementMetadata& getMetadata() const;
 
     static std::unique_ptr<PreparedStatement> getPreparedStatementWithError(
         const std::string& errorMessage);
@@ -88,6 +136,7 @@ private:
     std::string cachedPreparedStatementName;
     std::unordered_set<std::string> unknownParameters;
     std::unordered_map<std::string, std::shared_ptr<common::Value>> parameterMap;
+    PreparedStatementMetadata metadata;
 };
 
 } // namespace main

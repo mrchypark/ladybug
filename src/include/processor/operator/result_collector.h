@@ -1,6 +1,8 @@
 #pragma once
 
+#include <atomic>
 #include <mutex>
+#include <optional>
 
 #include "binder/expression/expression.h"
 #include "common/enums/accumulate_type.h"
@@ -12,8 +14,13 @@ namespace processor {
 
 class ResultCollectorSharedState {
 public:
-    explicit ResultCollectorSharedState(std::shared_ptr<FactorizedTable> table)
-        : table{std::move(table)} {}
+    explicit ResultCollectorSharedState(std::shared_ptr<FactorizedTable> table,
+        std::optional<uint64_t> maxOutputRows = std::nullopt)
+        : table{std::move(table)}, maxOutputRows{maxOutputRows} {}
+
+    void reserveOutputRows(uint64_t numRows);
+
+    bool hasOutputRowLimit() const { return maxOutputRows.has_value(); }
 
     void mergeLocalTable(FactorizedTable& localTable) {
         std::unique_lock lck{mtx};
@@ -25,6 +32,8 @@ public:
 private:
     std::mutex mtx;
     std::shared_ptr<FactorizedTable> table;
+    const std::optional<uint64_t> maxOutputRows;
+    std::atomic<uint64_t> reservedOutputRows = 0;
 };
 
 struct ResultCollectorInfo {

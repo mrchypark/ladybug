@@ -467,8 +467,8 @@ std::unique_ptr<ParsedExpression> Transformer::transformStructLiteral(
 
 std::unique_ptr<ParsedExpression> Transformer::transformParameterExpression(
     CypherParser::OC_ParameterContext& ctx) {
-    auto parameterName =
-        ctx.oC_SymbolicName() ? ctx.oC_SymbolicName()->getText() : ctx.DecimalInteger()->getText();
+    auto parameterName = ctx.oC_SymbolicName() ? transformSymbolicName(*ctx.oC_SymbolicName()) :
+                                                 ctx.DecimalInteger()->getText();
     return std::make_unique<ParsedParameterExpression>(parameterName, ctx.getText());
 }
 

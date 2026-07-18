@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+
 #include "common/arrow/arrow_result_config.h"
 #include "main/query_result.h"
 #include "planner/operator/logical_operator.h"
@@ -62,7 +64,8 @@ public:
 
     std::unique_ptr<PhysicalPlan> getPhysicalPlan(const planner::LogicalPlan* logicalPlan,
         const binder::expression_vector& expressions, main::QueryResultType resultType,
-        common::ArrowResultConfig arrowConfig);
+        common::ArrowResultConfig arrowConfig,
+        std::optional<uint64_t> maxOutputRows = std::nullopt);
 
     uint32_t getOperatorID() { return physicalOperatorID++; }
 
@@ -181,7 +184,8 @@ public:
 
     std::unique_ptr<ResultCollector> createResultCollector(common::AccumulateType accumulateType,
         const binder::expression_vector& expressions, planner::Schema* schema,
-        std::unique_ptr<PhysicalOperator> prevOperator);
+        std::unique_ptr<PhysicalOperator> prevOperator,
+        std::optional<uint64_t> maxOutputRows = std::nullopt);
     std::unique_ptr<PhysicalOperator> createArrowResultCollector(
         common::ArrowResultConfig arrowConfig, const binder::expression_vector& expressions,
         planner::Schema* schema, std::unique_ptr<PhysicalOperator> prevOperator,

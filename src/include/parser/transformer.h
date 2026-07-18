@@ -29,6 +29,7 @@ class PatternElement;
 class NodePattern;
 class PatternElementChain;
 class RelPattern;
+struct PatternLabel;
 struct ParsedCaseAlternative;
 struct BaseScanSource;
 struct JoinHintNode;
@@ -260,6 +261,14 @@ public:
     std::unique_ptr<Statement> transformExtensionStatement(antlr4::ParserRuleContext* ctx);
 
 private:
+    std::vector<PatternLabel> transformRelTypeInfos(
+        CypherParser::OC_RelationshipTypesContext& ctx);
+    std::vector<PatternLabel> transformNodeLabelInfos(CypherParser::OC_NodeLabelsContext& ctx);
+    std::vector<std::string> transformLabelNameComponents(
+        CypherParser::OC_LabelNameContext& ctx);
+    std::vector<std::string> transformRelTypeNameComponents(
+        CypherParser::OC_RelTypeNameContext& ctx);
+
     CypherParser::IC_StatementsContext& root;
     std::vector<extension::TransformerExtension*> transformerExtensions;
 };

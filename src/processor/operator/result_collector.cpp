@@ -1,6 +1,9 @@
 #include "processor/operator/result_collector.h"
 
+#include <format>
+
 #include "binder/expression/expression_util.h"
+#include "common/exception/runtime.h"
 #include "main/query_result/materialized_query_result.h"
 #include "processor/execution_context.h"
 #include "storage/buffer_manager/memory_manager.h"
@@ -10,6 +13,23 @@ using namespace lbug::storage;
 
 namespace lbug {
 namespace processor {
+
+void ResultCollectorSharedState::reserveOutputRows(uint64_t numRows) {
+    if (!maxOutputRows.has_value()) {
+        return;
+    }
+    auto reserved = reservedOutputRows.load(std::memory_order_relaxed);
+    while (true) {
+        if (reserved > maxOutputRows.value() || numRows > maxOutputRows.value() - reserved) {
+            throw RuntimeException(std::format(
+                "Query exceeded the maximum output row limit of {}.", maxOutputRows.value()));
+        }
+        if (reservedOutputRows.compare_exchange_weak(reserved, reserved + numRows,
+                std::memory_order_relaxed)) {
+            return;
+        }
+    }
+}
 
 std::string ResultCollectorPrintInfo::toString() const {
     std::string result = "";
@@ -47,7 +67,15 @@ void ResultCollector::executeInternal(ExecutionContext* context) {
     while (children[0]->getNextTuple(context)) {
         if (!payloadVectors.empty()) {
             for (auto i = 0u; i < resultSet->multiplicity; i++) {
+                const auto previousNumTuples = localTable->getNumTuples();
                 localTable->append(payloadAndMarkVectors);
+                if (!sharedState->hasOutputRowLimit()) {
+                    continue;
+                }
+                for (auto tupleIdx = previousNumTuples; tupleIdx < localTable->getNumTuples();
+                     ++tupleIdx) {
+                    sharedState->reserveOutputRows(localTable->getNumFlatTuples(tupleIdx));
+                }
             }
         }
     }

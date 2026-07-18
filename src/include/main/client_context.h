@@ -163,10 +163,14 @@ public:
     struct QueryConfig {
         QueryResultType resultType;
         common::ArrowResultConfig arrowConfig;
+        std::optional<uint64_t> maxOutputRows;
 
-        QueryConfig() : resultType{QueryResultType::FTABLE}, arrowConfig{} {}
+        QueryConfig() : resultType{QueryResultType::FTABLE}, arrowConfig{}, maxOutputRows{} {}
+        explicit QueryConfig(uint64_t maxOutputRows)
+            : resultType{QueryResultType::FTABLE}, arrowConfig{},
+              maxOutputRows{maxOutputRows} {}
         QueryConfig(QueryResultType resultType, common::ArrowResultConfig arrowConfig)
-            : resultType{resultType}, arrowConfig{arrowConfig} {}
+            : resultType{resultType}, arrowConfig{arrowConfig}, maxOutputRows{} {}
     };
 
     std::unique_ptr<QueryResult> query(std::string_view queryStatement,
@@ -175,7 +179,7 @@ public:
         std::unordered_map<std::string, std::unique_ptr<common::Value>> inputParams = {});
     std::unique_ptr<QueryResult> executeWithParams(PreparedStatement* preparedStatement,
         std::unordered_map<std::string, std::unique_ptr<common::Value>> inputParams,
-        std::optional<uint64_t> queryID = std::nullopt);
+        std::optional<uint64_t> queryID = std::nullopt, QueryConfig config = {});
 
     struct TransactionHelper {
         enum class TransactionCommitAction : uint8_t {

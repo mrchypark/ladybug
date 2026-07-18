@@ -17,7 +17,9 @@
 #include "main/database.h"
 #include "main/database_manager.h"
 #include "main/db_config.h"
+#include "main/prepared_statement_metadata_analyzer.h"
 #include "optimizer/optimizer.h"
+#include "parser/explain_statement.h"
 #include "parser/parser.h"
 #include "parser/visitor/standalone_call_rewriter.h"
 #include "parser/visitor/statement_read_write_analyzer.h"
@@ -366,19 +368,29 @@ static void bindParametersNoLock(PreparedStatement& preparedStatement,
     }
 }
 
+static constexpr std::string_view MAX_OUTPUT_ROWS_POLICY_ERROR =
+    "maxOutputRows is only supported for side-effect-free read-only statements.";
+
+static bool supportsMaxOutputRows(const PreparedStatement& preparedStatement,
+    const CachedPreparedStatement& cachedStatement) {
+    if (!preparedStatement.isReadOnly()) {
+        return false;
+    }
+    auto parsedStatement = cachedStatement.parsedStatement.get();
+    while (parsedStatement->getStatementType() == StatementType::EXPLAIN) {
+        parsedStatement = parsedStatement->constCast<ExplainStatement>().getStatementToExplain();
+    }
+    return parsedStatement->getStatementType() == StatementType::QUERY;
+}
+
 std::unique_ptr<QueryResult> ClientContext::executeWithParams(PreparedStatement* preparedStatement,
     std::unordered_map<std::string, std::unique_ptr<Value>> inputParams,
-    std::optional<uint64_t> queryID) { // NOLINT(performance-unnecessary-value-param): It doesn't
+    std::optional<uint64_t> queryID,
+    QueryConfig config) { // NOLINT(performance-unnecessary-value-param): It doesn't
     // make sense to pass the map as a const reference.
     lock_t lck{mtx};
     if (!preparedStatement->isSuccess()) {
         return QueryResult::getQueryResultWithError(preparedStatement->errMsg);
-    }
-    const auto useCachedPlan = preparedStatement->canReuseCachedPlanWith(inputParams);
-    try {
-        bindParametersNoLock(*preparedStatement, inputParams);
-    } catch (std::exception& e) {
-        return QueryResult::getQueryResultWithError(e.what());
     }
     auto name = preparedStatement->getName();
     // LCOV_EXCL_START
@@ -389,15 +401,25 @@ std::unique_ptr<QueryResult> ClientContext::executeWithParams(PreparedStatement*
     }
     // LCOV_EXCL_STOP
     auto cachedStatement = cachedPreparedStatementManager.getCachedStatement(name);
+    if (config.maxOutputRows.has_value() &&
+        !supportsMaxOutputRows(*preparedStatement, *cachedStatement)) {
+        return QueryResult::getQueryResultWithError(std::string{MAX_OUTPUT_ROWS_POLICY_ERROR});
+    }
+    const auto useCachedPlan = preparedStatement->canReuseCachedPlanWith(inputParams);
+    try {
+        bindParametersNoLock(*preparedStatement, inputParams);
+    } catch (std::exception& e) {
+        return QueryResult::getQueryResultWithError(e.what());
+    }
     if (useCachedPlan) {
-        return executeNoLock(preparedStatement, cachedStatement, queryID);
+        return executeNoLock(preparedStatement, cachedStatement, queryID, config);
     }
     // rebind
     auto [newPreparedStatement, newCachedStatement] =
         prepareNoLock(cachedStatement->parsedStatement, false /*shouldCommitNewTransaction*/,
             preparedStatement->parameterMap);
     useInternalCatalogEntry_ = false;
-    return executeNoLock(newPreparedStatement.get(), newCachedStatement.get(), queryID);
+    return executeNoLock(newPreparedStatement.get(), newCachedStatement.get(), queryID, config);
 }
 
 std::unique_ptr<QueryResult> ClientContext::query(std::string_view query,
@@ -512,12 +534,14 @@ ClientContext::PrepareResult ClientContext::prepareNoLock(
     prepareTimer.start();
     try {
         preparedStatement->preparedSummary.statementType = parsedStatement->getStatementType();
+        preparedStatement->metadata = PreparedStatementMetadataAnalyzer::analyze(*parsedStatement);
         auto readWriteAnalyzer = StatementReadWriteAnalyzer(this);
         TransactionHelper::runFuncInTransaction(
             *transactionContext, [&]() -> void { readWriteAnalyzer.visit(*parsedStatement); },
             true /* readOnly */, false /* */,
             TransactionHelper::TransactionCommitAction::COMMIT_IF_NEW);
         preparedStatement->readOnly = readWriteAnalyzer.isReadOnly();
+        preparedStatement->metadata.readOnly = preparedStatement->readOnly;
         validateTransaction(preparedStatement->readOnly, parsedStatement->requireTransaction());
         TransactionHelper::runFuncInTransaction(
             *transactionContext,
@@ -558,6 +582,14 @@ std::unique_ptr<QueryResult> ClientContext::executeNoLock(PreparedStatement* pre
     if (!preparedStatement->isSuccess()) {
         return QueryResult::getQueryResultWithError(preparedStatement->errMsg);
     }
+    if (queryConfig.maxOutputRows.has_value() &&
+        !supportsMaxOutputRows(*preparedStatement, *cachedStatement)) {
+        if (transactionContext->isAutoTransaction() &&
+            transactionContext->hasActiveTransaction()) {
+            transactionContext->rollback();
+        }
+        return QueryResult::getQueryResultWithError(std::string{MAX_OUTPUT_ROWS_POLICY_ERROR});
+    }
     useInternalCatalogEntry_ = cachedStatement->useInternalCatalogEntry;
     this->resetActiveQuery();
     this->startTimer();
@@ -580,17 +612,18 @@ std::unique_ptr<QueryResult> ClientContext::executeNoLock(PreparedStatement* pre
                     std::make_unique<ExecutionContext>(profiler.get(), this, *queryID);
                 auto mapper = PlanMapper(executionContext.get());
                 const auto physicalPlan = mapper.getPhysicalPlan(cachedStatement->logicalPlan.get(),
-                    cachedStatement->columns, queryConfig.resultType, queryConfig.arrowConfig);
+                    cachedStatement->columns, queryConfig.resultType, queryConfig.arrowConfig,
+                    queryConfig.maxOutputRows);
                 if (isTransactionStatement) {
                     result = localDatabase->queryProcessor->execute(physicalPlan.get(),
-                        executionContext.get());
+                        executionContext.get(), queryConfig.maxOutputRows);
                 } else {
                     if (preparedStatement->getStatementType() == StatementType::COPY_FROM) {
                         // Note: We always force checkpoint for COPY_FROM statement.
                         Transaction::Get(*this)->setForceCheckpoint();
                     }
                     result = localDatabase->queryProcessor->execute(physicalPlan.get(),
-                        executionContext.get());
+                        executionContext.get(), queryConfig.maxOutputRows);
                 }
             },
             preparedStatement->isReadOnly(), isTransactionStatement,

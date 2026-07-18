@@ -5,6 +5,7 @@
 #include "common/assert.h"
 #include "common/exception/runtime.h"
 #include "common/null_buffer.h"
+#include "common/numeric_utils.h"
 #include "common/vector/value_vector.h"
 #include "storage/buffer_manager/memory_manager.h"
 
@@ -258,9 +259,13 @@ bool FactorizedTable::hasUnflatCol() const {
 }
 
 uint64_t FactorizedTable::getTotalNumFlatTuples() const {
-    auto totalNumFlatTuples = 0ul;
+    auto totalNumFlatTuples = uint64_t{0};
     for (auto i = 0u; i < getNumTuples(); i++) {
-        totalNumFlatTuples += getNumFlatTuples(i);
+        auto nextTotal = uint64_t{0};
+        if (!numeric_utils::tryAdd(totalNumFlatTuples, getNumFlatTuples(i), nextTotal)) {
+            throw RuntimeException("Factorized table logical row cardinality overflow.");
+        }
+        totalNumFlatTuples = nextTotal;
     }
     return totalNumFlatTuples;
 }
@@ -274,7 +279,13 @@ uint64_t FactorizedTable::getNumFlatTuples(ft_tuple_idx_t tupleIdx) const {
         auto groupID = column->getGroupID();
         if (!calculatedGroups.contains(groupID)) {
             calculatedGroups[groupID] = true;
-            numFlatTuples *= column->isFlat() ? 1 : ((overflow_value_t*)tupleBuffer)->numElements;
+            const auto multiplicity =
+                column->isFlat() ? uint64_t{1} : ((overflow_value_t*)tupleBuffer)->numElements;
+            auto nextNumFlatTuples = uint64_t{0};
+            if (!numeric_utils::tryMultiply(numFlatTuples, multiplicity, nextNumFlatTuples)) {
+                throw RuntimeException("Factorized table logical row cardinality overflow.");
+            }
+            numFlatTuples = nextNumFlatTuples;
         }
         tupleBuffer += column->getNumBytes();
     }

@@ -3,6 +3,7 @@
 #include <cstdlib>
 
 #include "common/assert.h"
+#include "common/string_utils.h"
 #include "common/exception/parser.h"
 #include "extension/transformer_extension.h"
 #include "parser/analyze_statement.h"
@@ -214,7 +215,9 @@ std::string Transformer::transformSymbolicName(CypherParser::OC_SymbolicNameCont
         std::string escapedSymbolName = ctx.EscapedSymbolicName()->getText();
         // escapedSymbolName symbol will be of form "`Some.Value`". Therefore, we need to sanitize
         // it such that we don't store the symbol with escape character.
-        return escapedSymbolName.substr(1, escapedSymbolName.size() - 2);
+        auto result = escapedSymbolName.substr(1, escapedSymbolName.size() - 2);
+        StringUtils::replaceAll(result, "``", "`");
+        return result;
     } else {
         DASSERT(ctx.HexLetter() || ctx.UnescapedSymbolicName() || ctx.iC_NonReservedKeywords());
         return ctx.getText();

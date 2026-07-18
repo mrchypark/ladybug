@@ -1,5 +1,8 @@
 #include "processor/processor.h"
 
+#include <format>
+
+#include "common/exception/runtime.h"
 #include "common/task_system/progress_bar.h"
 #include "main/client_context.h"
 #include "main/query_result.h"
@@ -24,7 +27,7 @@ QueryProcessor::QueryProcessor(uint64_t numThreads) {
 #endif
 
 std::unique_ptr<main::QueryResult> QueryProcessor::execute(PhysicalPlan* physicalPlan,
-    ExecutionContext* context) {
+    ExecutionContext* context, std::optional<uint64_t> maxOutputRows) {
     context->clientContext->registerQueryStart();
     struct Guard {
         main::ClientContext* ctx;
@@ -44,8 +47,14 @@ std::unique_ptr<main::QueryResult> QueryProcessor::execute(PhysicalPlan* physica
     auto progressBar = ProgressBar::Get(*context->clientContext);
     progressBar->startProgress(context->queryID);
     taskScheduler->scheduleTaskAndWaitOrError(task, context);
+    auto result = sink->getQueryResult();
+    if (maxOutputRows.has_value() && result->getType() == main::QueryResultType::FTABLE &&
+        result->getNumTuples() > maxOutputRows.value()) {
+        throw RuntimeException(std::format(
+            "Query exceeded the maximum output row limit of {}.", maxOutputRows.value()));
+    }
     progressBar->endProgress(context->queryID);
-    return sink->getQueryResult();
+    return result;
 }
 
 void QueryProcessor::decomposePlanIntoTask(PhysicalOperator* op, Task* task,

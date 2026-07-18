@@ -12,7 +12,7 @@ namespace processor {
 
 std::unique_ptr<ResultCollector> PlanMapper::createResultCollector(AccumulateType accumulateType,
     const expression_vector& expressions, Schema* schema,
-    std::unique_ptr<PhysicalOperator> prevOperator) {
+    std::unique_ptr<PhysicalOperator> prevOperator, std::optional<uint64_t> maxOutputRows) {
     std::vector<DataPos> payloadsPos;
     for (auto& expr : expressions) {
         payloadsPos.push_back(getDataPos(*expr, *schema));
@@ -25,7 +25,8 @@ std::unique_ptr<ResultCollector> PlanMapper::createResultCollector(AccumulateTyp
     }
     auto table = std::make_shared<FactorizedTable>(storage::MemoryManager::Get(*clientContext),
         tableSchema.copy());
-    auto sharedState = std::make_shared<ResultCollectorSharedState>(std::move(table));
+    auto sharedState =
+        std::make_shared<ResultCollectorSharedState>(std::move(table), maxOutputRows);
     auto opInfo = ResultCollectorInfo(accumulateType, std::move(tableSchema), payloadsPos);
     auto printInfo = std::make_unique<ResultCollectorPrintInfo>(expressions, accumulateType);
     auto op = std::make_unique<ResultCollector>(std::move(opInfo), std::move(sharedState),

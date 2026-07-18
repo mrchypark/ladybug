@@ -48,15 +48,16 @@ NodePattern Transformer::transformNodePattern(CypherParser::OC_NodePatternContex
     if (ctx.oC_Variable()) {
         variable = transformVariable(*ctx.oC_Variable());
     }
-    auto nodeLabels = std::vector<std::string>{};
+    auto nodeLabels = std::vector<PatternLabel>{};
     if (ctx.oC_NodeLabels()) {
-        nodeLabels = transformNodeLabels(*ctx.oC_NodeLabels());
+        nodeLabels = transformNodeLabelInfos(*ctx.oC_NodeLabels());
     }
     auto properties = std::vector<std::pair<std::string, std::unique_ptr<ParsedExpression>>>{};
     if (ctx.iC_Properties()) {
         properties = transformProperties(*ctx.iC_Properties());
     }
-    return NodePattern(std::move(variable), std::move(nodeLabels), std::move(properties));
+    return NodePattern::fromLabelInfos(
+        std::move(variable), std::move(nodeLabels), std::move(properties));
 }
 
 PatternElementChain Transformer::transformPatternElementChain(
@@ -69,7 +70,7 @@ RelPattern Transformer::transformRelationshipPattern(
     CypherParser::OC_RelationshipPatternContext& ctx) {
     auto relDetail = ctx.oC_RelationshipDetail();
     auto variable = std::string();
-    auto relTypes = std::vector<std::string>{};
+    auto relTypes = std::vector<PatternLabel>{};
     auto properties = std::vector<std::pair<std::string, std::unique_ptr<ParsedExpression>>>{};
     // Parse name, label & properties
     if (relDetail) {
@@ -77,7 +78,7 @@ RelPattern Transformer::transformRelationshipPattern(
             variable = transformVariable(*relDetail->oC_Variable());
         }
         if (relDetail->oC_RelationshipTypes()) {
-            relTypes = transformRelTypes(*relDetail->oC_RelationshipTypes());
+            relTypes = transformRelTypeInfos(*relDetail->oC_RelationshipTypes());
         }
         if (relDetail->iC_Properties()) {
             properties = transformProperties(*relDetail->iC_Properties());
@@ -168,8 +169,8 @@ RelPattern Transformer::transformRelationshipPattern(
             }
         }
     }
-    return RelPattern(variable, relTypes, relType, arrowDirection, std::move(properties),
-        std::move(recursiveInfo));
+    return RelPattern::fromLabelInfos(variable, relTypes, relType, arrowDirection,
+        std::move(properties), std::move(recursiveInfo));
 }
 
 std::vector<s_parsed_expr_pair> Transformer::transformProperties(
@@ -193,10 +194,31 @@ std::vector<std::string> Transformer::transformRelTypes(
     return relTypes;
 }
 
-std::vector<std::string> Transformer::transformNodeLabels(CypherParser::OC_NodeLabelsContext& ctx) {
+std::vector<std::string> Transformer::transformNodeLabels(
+    CypherParser::OC_NodeLabelsContext& ctx) {
     std::vector<std::string> nodeLabels;
     for (auto& labelName : ctx.oC_LabelName()) {
         nodeLabels.push_back(transformLabelName(*labelName));
+    }
+    return nodeLabels;
+}
+
+std::vector<PatternLabel> Transformer::transformRelTypeInfos(
+    CypherParser::OC_RelationshipTypesContext& ctx) {
+    std::vector<PatternLabel> relTypes;
+    for (auto& relType : ctx.oC_RelTypeName()) {
+        relTypes.push_back(
+            {transformRelTypeName(*relType), transformRelTypeNameComponents(*relType)});
+    }
+    return relTypes;
+}
+
+std::vector<PatternLabel> Transformer::transformNodeLabelInfos(
+    CypherParser::OC_NodeLabelsContext& ctx) {
+    std::vector<PatternLabel> nodeLabels;
+    for (auto& labelName : ctx.oC_LabelName()) {
+        nodeLabels.push_back(
+            {transformLabelName(*labelName), transformLabelNameComponents(*labelName)});
     }
     return nodeLabels;
 }
@@ -212,6 +234,26 @@ std::string Transformer::transformLabelName(CypherParser::OC_LabelNameContext& c
 
 std::string Transformer::transformRelTypeName(CypherParser::OC_RelTypeNameContext& ctx) {
     return transformSchemaName(*ctx.oC_SchemaName());
+}
+
+std::vector<std::string> Transformer::transformLabelNameComponents(
+    CypherParser::OC_LabelNameContext& ctx) {
+    std::vector<std::string> components;
+    for (auto* schemaName : ctx.oC_SchemaName()) {
+        for (auto* symbolicName : schemaName->oC_SymbolicName()) {
+            components.push_back(transformSymbolicName(*symbolicName));
+        }
+    }
+    return components;
+}
+
+std::vector<std::string> Transformer::transformRelTypeNameComponents(
+    CypherParser::OC_RelTypeNameContext& ctx) {
+    std::vector<std::string> components;
+    for (auto* symbolicName : ctx.oC_SchemaName()->oC_SymbolicName()) {
+        components.push_back(transformSymbolicName(*symbolicName));
+    }
+    return components;
 }
 
 } // namespace parser

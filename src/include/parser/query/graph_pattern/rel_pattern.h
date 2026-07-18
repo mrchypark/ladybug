@@ -32,6 +32,14 @@ public:
         : NodePattern{std::move(name), std::move(tableNames), std::move(propertyKeyValPairs)},
           relType{relType}, arrowDirection{arrowDirection},
           recursiveInfo{std::move(recursiveInfo)} {}
+
+    static RelPattern fromLabelInfos(std::string name, std::vector<PatternLabel> tableNames,
+        common::QueryRelType relType, ArrowDirection arrowDirection,
+        std::vector<s_parsed_expr_pair> propertyKeyValPairs,
+        RecursiveRelPatternInfo recursiveInfo) {
+        return RelPattern{std::move(name), std::move(tableNames), relType, arrowDirection,
+            std::move(propertyKeyValPairs), std::move(recursiveInfo), PatternLabelInfoTag{}};
+    }
     DELETE_COPY_DEFAULT_MOVE(RelPattern);
 
     common::QueryRelType getRelType() const { return relType; }
@@ -41,6 +49,15 @@ public:
     const RecursiveRelPatternInfo* getRecursiveInfo() const { return &recursiveInfo; }
 
 private:
+    RelPattern(std::string name, std::vector<PatternLabel> tableNames,
+        common::QueryRelType relType, ArrowDirection arrowDirection,
+        std::vector<s_parsed_expr_pair> propertyKeyValPairs,
+        RecursiveRelPatternInfo recursiveInfo, PatternLabelInfoTag)
+        : NodePattern{std::move(name), std::move(tableNames), std::move(propertyKeyValPairs),
+              PatternLabelInfoTag{}},
+          relType{relType}, arrowDirection{arrowDirection},
+          recursiveInfo{std::move(recursiveInfo)} {}
+
     common::QueryRelType relType;
     ArrowDirection arrowDirection;
     RecursiveRelPatternInfo recursiveInfo;
