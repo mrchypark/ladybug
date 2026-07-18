@@ -292,61 +292,9 @@ void LocalFileSystem::createDir(const std::string& dir) const {
     }
 }
 
-static bool isAllowedDeletionPath(const std::string& path, const std::string& dbPath) {
-    const auto p = std::filesystem::path(path);
-    const auto dbPathP = std::filesystem::path(dbPath);
-    const auto dbDir = dbPathP.parent_path();
-    // For absolute paths, only allow deletion in the same directory as the database file.
-    if (p.is_absolute() && dbPathP.is_absolute() && p.parent_path() != dbDir) {
-        return false;
-    }
-
-    const auto fileName = p.filename().string();
-    const auto extension = p.extension().string();
-    const auto stemWithoutExt = p.stem().string();
-
-    const auto dbBase = dbPathP.stem().string();
-    const auto dbExt = dbPathP.extension().string();
-    const auto dbFileName = dbBase + dbExt;
-
-    // Main DB sidecars: db.lbdb.{wal|shadow|tmp|lock}
-    if (extension == ".wal" || extension == ".shadow" || extension == ".tmp" ||
-        extension == ".lock" || extension == ".checkpoint") {
-        if (stemWithoutExt == dbFileName) {
-            return true;
-        }
-        // Graph/copy sidecars can use either:
-        // - db.<graph>.lbdb.{wal|shadow|tmp|lock}
-        // - db.lbdb.<graph-or-tag>.{wal|shadow|tmp|lock}
-        return (stemWithoutExt.starts_with(dbBase + ".") && stemWithoutExt.ends_with(dbExt)) ||
-               stemWithoutExt.starts_with(dbFileName + ".");
-    }
-
-    // Graph DB file: db.<graph>.lbdb
-    if (extension == dbExt) {
-        return fileName.starts_with(dbBase + ".") && fileName != dbFileName;
-    }
-
-    return false;
-}
-
-static bool isExtensionFile(const main::ClientContext* context, const std::string& path) {
-    if (context == nullptr) {
-        return false;
-    }
-    auto extensionDir = context->getExtensionDir();
-    std::filesystem::path rel = std::filesystem::relative(path, extensionDir);
-    for (const auto& part : rel) {
-        if (part == "..") {
-            return false;
-        }
-    }
-    return true;
-}
-
 void LocalFileSystem::removeFileIfExists(const std::string& path,
     const main::ClientContext* context) {
-    if (!isAllowedDeletionPath(path, dbPath) && !isExtensionFile(context, path)) {
+    if (!isAllowedRemovalPath(path, dbPath, context)) {
         throw IOException(std::format(
             "Error: Path {} is not within the allowed list of files to be removed.", path));
     }
@@ -370,6 +318,15 @@ void LocalFileSystem::removeFileIfExists(const std::string& path,
 
 bool LocalFileSystem::fileOrPathExists(const std::string& path, main::ClientContext* /*context*/) {
     return std::filesystem::exists(path);
+}
+
+bool LocalFileSystem::isDirectory(const std::string& path) const {
+    std::error_code errorCode;
+    auto result = std::filesystem::is_directory(path, errorCode);
+    if (errorCode) {
+        throw IOException(std::format("Failed to inspect path {}: {}", path, errorCode.message()));
+    }
+    return result;
 }
 
 #ifndef _WIN32
@@ -570,6 +527,84 @@ void LocalFileSystem::syncFile(const FileInfo& fileInfo) const {
 #endif
 }
 
+#if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
+static void throwDirectorySyncError(const std::string& directoryPath, const std::string& syncError,
+    int fd) {
+    auto message = std::format("Failed to sync directory {}: {}", directoryPath, syncError);
+    if (close(fd) != 0) {
+        message +=
+            std::format(" Additionally failed to close the directory: {}", posixErrMessage());
+    }
+    throw IOException(message);
+}
+#endif
+
+void LocalFileSystem::syncDirectory(const std::string& directoryPath) const {
+#if defined(_WIN32)
+    auto widePath = WindowsUtils::utf8ToUnicode(directoryPath.c_str());
+    auto handle = CreateFileW(widePath.c_str(), GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        const auto error = GetLastError();
+        throw IOException(std::format("Failed to open directory {} for sync. Error {}: {}",
+            directoryPath, error, std::system_category().message(error)));
+    }
+    if (FlushFileBuffers(handle) == 0) {
+        const auto syncError = GetLastError();
+        auto message = std::format("Failed to sync directory {}. Error {}: {}", directoryPath,
+            syncError, std::system_category().message(syncError));
+        if (CloseHandle(handle) == 0) {
+            const auto closeError = GetLastError();
+            message += std::format(" Additionally failed to close the directory. Error {}: {}",
+                closeError, std::system_category().message(closeError));
+        }
+        throw IOException(message);
+    }
+    if (CloseHandle(handle) == 0) {
+        const auto error = GetLastError();
+        throw IOException(std::format("Failed to close directory {} after sync. Error {}: {}",
+            directoryPath, error, std::system_category().message(error)));
+    }
+#elif defined(__EMSCRIPTEN__)
+    FileSystem::syncDirectory(directoryPath);
+#else
+    auto fd = open(directoryPath.c_str(), O_RDONLY
+#ifdef O_DIRECTORY
+                                              | O_DIRECTORY
+#endif
+#ifdef O_CLOEXEC
+                                              | O_CLOEXEC
+#endif
+    );
+    if (fd == -1) {
+        throw IOException(std::format("Failed to open directory {} for sync: {}", directoryPath,
+            posixErrMessage()));
+    }
+#if HAS_FULLFSYNC && defined(__APPLE__)
+    if (fcntl(fd, F_FULLFSYNC) == 0) {
+        if (close(fd) != 0) {
+            throw IOException(std::format("Failed to close directory {} after sync: {}",
+                directoryPath, posixErrMessage()));
+        }
+        return;
+    }
+    if (errno != ENOTSUP && errno != EINVAL) {
+        const auto error = posixErrMessage();
+        throwDirectorySyncError(directoryPath, error, fd);
+    }
+#endif
+    if (fsync(fd) != 0) {
+        const auto error = posixErrMessage();
+        throwDirectorySyncError(directoryPath, error, fd);
+    }
+    if (close(fd) != 0) {
+        throw IOException(std::format("Failed to close directory {} after sync: {}", directoryPath,
+            posixErrMessage()));
+    }
+#endif
+}
+
 int64_t LocalFileSystem::seek(FileInfo& fileInfo, uint64_t offset, int whence) const {
     auto localFileInfo = fileInfo.constPtrCast<LocalFileInfo>();
 #if defined(_WIN32)
@@ -626,7 +661,7 @@ uint64_t LocalFileSystem::getFileSize(const FileInfo& fileInfo) const {
     }
     return size.QuadPart;
 #else
-    struct stat s {};
+    struct stat s{};
     if (fstat(localFileInfo->fd, &s) == -1) {
         throw IOException(std::format("Cannot read size of file. path: {} - Error {}: {}",
             fileInfo.path, errno, posixErrMessage()));

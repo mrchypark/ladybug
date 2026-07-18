@@ -1,12 +1,16 @@
+#include <algorithm>
 #include <cstring>
 #include <fstream>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <utility>
 
 #include "api_test/api_test.h"
 #include "common/exception/io.h"
 #include "common/exception/runtime.h"
 #include "common/exception/storage.h"
+#include "common/file_system/local_file_system.h"
 #include "common/file_system/virtual_file_system.h"
 #include "common/serializer/buffer_reader.h"
 #include "common/serializer/buffer_writer.h"
@@ -37,11 +41,17 @@ protected:
 
 class FailingSyncFileSystem final : public FileSystem {
 public:
-    explicit FailingSyncFileSystem(bool failSync) : failSync{failSync} {}
+    explicit FailingSyncFileSystem(bool failSync, bool failDirectorySync = false)
+        : failSync{failSync}, failDirectorySync{failDirectorySync} {}
 
     void setFailSync(bool fail) {
         std::unique_lock lck{mtx};
         failSync = fail;
+    }
+
+    std::vector<std::string> takeEvents() {
+        std::unique_lock lck{mtx};
+        return std::exchange(events, std::vector<std::string>{});
     }
 
     bool canHandleFile(const std::string_view path) const override {
@@ -65,6 +75,7 @@ public:
 
     void renameFile(const std::string& from, const std::string& to) override {
         std::unique_lock lck{mtx};
+        events.push_back("rename");
         files[to] = std::move(files[from]);
         files.erase(from);
     }
@@ -88,8 +99,17 @@ public:
 
     void syncFile(const FileInfo& /*fileInfo*/) const override {
         std::unique_lock lck{mtx};
+        events.push_back("sync-file");
         if (failSync) {
             throw IOException{"Injected WAL sync failure."};
+        }
+    }
+
+    void syncDirectory(const std::string& directoryPath) const override {
+        std::unique_lock lck{mtx};
+        events.push_back("sync-directory:" + directoryPath);
+        if (failDirectorySync) {
+            throw IOException{"Injected directory sync failure."};
         }
     }
 
@@ -132,9 +152,232 @@ protected:
 
 private:
     bool failSync;
+    bool failDirectorySync;
     mutable std::mutex mtx;
     mutable std::unordered_map<std::string, std::vector<uint8_t>> files;
+    mutable std::vector<std::string> events;
 };
+
+struct RecordingFileSystemState {
+    mutable std::mutex mtx;
+    std::vector<std::string> operations;
+    bool fileSystemAlive = true;
+    uint64_t destroyedHandles = 0;
+    bool handleDestroyedAfterFileSystem = false;
+};
+
+struct RecordingLocalFileInfo final : FileInfo {
+    RecordingLocalFileInfo(std::unique_ptr<FileInfo> inner, FileSystem* fileSystem,
+        std::shared_ptr<RecordingFileSystemState> state)
+        : FileInfo{inner->path, fileSystem}, inner{std::move(inner)}, state{std::move(state)} {}
+
+    ~RecordingLocalFileInfo() override {
+        std::unique_lock lck{state->mtx};
+        ++state->destroyedHandles;
+        state->handleDestroyedAfterFileSystem |= !state->fileSystemAlive;
+    }
+
+    std::unique_ptr<FileInfo> inner;
+    std::shared_ptr<RecordingFileSystemState> state;
+};
+
+class RecordingLocalFileSystem final : public FileSystem {
+public:
+    explicit RecordingLocalFileSystem(const std::string& databasePath,
+        std::shared_ptr<RecordingFileSystemState> state =
+            std::make_shared<RecordingFileSystemState>(),
+        std::string failOpenPath = "")
+        : local{databasePath}, state{std::move(state)}, failOpenPath{std::move(failOpenPath)} {}
+
+    ~RecordingLocalFileSystem() override {
+        std::unique_lock lck{state->mtx};
+        state->fileSystemAlive = false;
+    }
+
+    std::unique_ptr<FileInfo> openFile(const std::string& path, FileOpenFlags flags,
+        lbug::main::ClientContext* context = nullptr) override {
+        recordOperation("open:" + path);
+        if (path == failOpenPath) {
+            throw IOException{"Injected open failure."};
+        }
+        return std::make_unique<RecordingLocalFileInfo>(
+            local.openFile(path, flags, context), this, state);
+    }
+
+    std::vector<std::string> glob(lbug::main::ClientContext* context,
+        const std::string& path) const override {
+        return local.glob(context, path);
+    }
+
+    void overwriteFile(const std::string& from, const std::string& to) override {
+        local.overwriteFile(from, to);
+    }
+
+    void renameFile(const std::string& from, const std::string& to) override {
+        local.renameFile(from, to);
+    }
+
+    void copyFile(const std::string& from, const std::string& to) override {
+        local.copyFile(from, to);
+    }
+
+    void createDir(const std::string& dir) const override { local.createDir(dir); }
+
+    void removeFileIfExists(const std::string& path,
+        const lbug::main::ClientContext* context = nullptr) override {
+        local.removeFileIfExists(path, context);
+    }
+
+    bool fileOrPathExists(const std::string& path,
+        lbug::main::ClientContext* context = nullptr) override {
+        return local.fileOrPathExists(path, context);
+    }
+
+    bool isDirectory(const std::string& path) const override { return local.isDirectory(path); }
+
+    std::string expandPath(lbug::main::ClientContext* context,
+        const std::string& path) const override {
+        return local.expandPath(context, path);
+    }
+
+    void syncFile(const FileInfo& fileInfo) const override {
+        recordOperation("sync:" + fileInfo.path);
+        fileInfo.constCast<RecordingLocalFileInfo>().inner->syncFile();
+    }
+
+    void syncDirectory(const std::string& directoryPath) const override {
+        local.syncDirectory(directoryPath);
+    }
+
+    std::vector<std::string> getOperations() const {
+        std::unique_lock lck{state->mtx};
+        return state->operations;
+    }
+
+protected:
+    void readFromFile(FileInfo& fileInfo, void* buffer, uint64_t numBytes,
+        uint64_t position) const override {
+        recordOperation("read:" + fileInfo.path);
+        fileInfo.cast<RecordingLocalFileInfo>().inner->readFromFile(
+            buffer, numBytes, position);
+    }
+
+    int64_t readFile(FileInfo& fileInfo, void* buffer, size_t numBytes) const override {
+        recordOperation("read:" + fileInfo.path);
+        return fileInfo.cast<RecordingLocalFileInfo>().inner->readFile(buffer, numBytes);
+    }
+
+    void writeFile(FileInfo& fileInfo, const uint8_t* buffer, uint64_t numBytes,
+        uint64_t offset) const override {
+        recordOperation("write:" + fileInfo.path);
+        fileInfo.cast<RecordingLocalFileInfo>().inner->writeFile(buffer, numBytes, offset);
+    }
+
+    int64_t seek(FileInfo& fileInfo, uint64_t offset, int whence) const override {
+        recordOperation("seek:" + fileInfo.path);
+        return fileInfo.cast<RecordingLocalFileInfo>().inner->seek(offset, whence);
+    }
+
+    void reset(FileInfo& fileInfo) override {
+        recordOperation("reset:" + fileInfo.path);
+        fileInfo.cast<RecordingLocalFileInfo>().inner->reset();
+    }
+
+    void truncate(FileInfo& fileInfo, uint64_t size) const override {
+        recordOperation("truncate:" + fileInfo.path);
+        fileInfo.cast<RecordingLocalFileInfo>().inner->truncate(size);
+    }
+
+    uint64_t getFileSize(const FileInfo& fileInfo) const override {
+        recordOperation("size:" + fileInfo.path);
+        return fileInfo.constCast<RecordingLocalFileInfo>().inner->getFileSize();
+    }
+
+private:
+    void recordOperation(std::string operation) const {
+        std::unique_lock lck{state->mtx};
+        state->operations.push_back(std::move(operation));
+    }
+
+    LocalFileSystem local;
+    std::shared_ptr<RecordingFileSystemState> state;
+    std::string failOpenPath;
+};
+
+TEST_F(WalTest, InjectedPrimaryObservesDatabaseOpenDuringConstruction) {
+    if (inMemMode) {
+        GTEST_SKIP();
+    }
+    conn.reset();
+    database.reset();
+    auto fileSystem = std::make_unique<RecordingLocalFileSystem>(databasePath);
+    auto* fileSystemPtr = fileSystem.get();
+
+    auto injectedDatabase = std::make_unique<lbug::main::Database>(
+        databasePath, *systemConfig, std::move(fileSystem));
+
+    const auto operations = fileSystemPtr->getOperations();
+    EXPECT_NE(std::find(operations.begin(), operations.end(), "open:" + databasePath),
+        operations.end());
+}
+
+TEST_F(WalTest, InjectedPrimaryObservesExistingWALDuringStartupRecovery) {
+    if (inMemMode || systemConfig->checkpointThreshold == 0) {
+        GTEST_SKIP();
+    }
+    ASSERT_TRUE(conn->query("CALL auto_checkpoint=false;")->isSuccess());
+    ASSERT_TRUE(conn->query("CALL force_checkpoint_on_close=false;")->isSuccess());
+    ASSERT_TRUE(conn->query(
+        "CREATE NODE TABLE injected_recovery(id INT64, PRIMARY KEY(id));"
+        "CREATE (:injected_recovery {id: 1});")
+                    ->isSuccess());
+    conn.reset();
+    database.reset();
+    const auto walPath = lbug::storage::StorageUtils::getWALFilePath(databasePath);
+    ASSERT_TRUE(std::filesystem::exists(walPath));
+    std::ofstream{walPath, std::ios::binary | std::ios::app}.write("x", 1);
+    auto fileSystem = std::make_unique<RecordingLocalFileSystem>(databasePath);
+    auto* fileSystemPtr = fileSystem.get();
+    auto injectedDatabase = std::make_unique<lbug::main::Database>(
+        databasePath, *systemConfig, std::move(fileSystem));
+
+    const auto operations = fileSystemPtr->getOperations();
+    for (const auto& expected : {"open:" + walPath, "read:" + walPath,
+             "truncate:" + walPath, "sync:" + walPath}) {
+        EXPECT_NE(std::find(operations.begin(), operations.end(), expected), operations.end())
+            << expected;
+    }
+    lbug::main::Connection injectedConnection{injectedDatabase.get()};
+    auto result = injectedConnection.query("MATCH (n:injected_recovery) RETURN COUNT(*);");
+    ASSERT_TRUE(result->isSuccess()) << result->getErrorMessage();
+    EXPECT_EQ(result->getNext()->getValue(0)->getValue<int64_t>(), 1);
+}
+
+TEST_F(WalTest, InjectedPrimaryOutlivesHandlesWhenConstructionFailsDuringRecovery) {
+    if (inMemMode || systemConfig->checkpointThreshold == 0) {
+        GTEST_SKIP();
+    }
+    ASSERT_TRUE(conn->query("CALL auto_checkpoint=false;")->isSuccess());
+    ASSERT_TRUE(conn->query("CALL force_checkpoint_on_close=false;")->isSuccess());
+    ASSERT_TRUE(conn->query("CREATE NODE TABLE lifetime_recovery(id INT64 PRIMARY KEY);")
+                    ->isSuccess());
+    conn.reset();
+    database.reset();
+    const auto walPath = lbug::storage::StorageUtils::getWALFilePath(databasePath);
+    ASSERT_TRUE(std::filesystem::exists(walPath));
+    auto state = std::make_shared<RecordingFileSystemState>();
+    auto fileSystem =
+        std::make_unique<RecordingLocalFileSystem>(databasePath, state, walPath);
+    auto config = *systemConfig;
+    config.throwOnWalReplayFailure = true;
+
+    EXPECT_ANY_THROW(std::make_unique<lbug::main::Database>(
+        databasePath, config, std::move(fileSystem)));
+
+    EXPECT_FALSE(state->fileSystemAlive);
+    EXPECT_GT(state->destroyedHandles, 0u);
+    EXPECT_FALSE(state->handleDestroyedAfterFileSystem);
+}
 
 TEST_F(WalTest, WALSyncFailurePoisonsWALAndReturnsAllocatedCommitSequence) {
     VirtualFileSystem vfs;
@@ -164,6 +407,46 @@ TEST_F(WalTest, WALSyncFailurePoisonsWALAndReturnsAllocatedCommitSequence) {
     EXPECT_THROW(wal.logCommittedWAL(secondLocalWAL, conn->getClientContext(), walCommitSequence),
         RuntimeException);
     EXPECT_EQ(walCommitSequence, 0);
+}
+
+TEST_F(WalTest, WALRotationSyncsFileBeforeRenameAndParentDirectory) {
+    auto fileSystem = std::make_unique<FailingSyncFileSystem>(false);
+    auto* fileSystemPtr = fileSystem.get();
+    VirtualFileSystem vfs{"/tmp/wal-rotation.db", std::move(fileSystem)};
+    lbug::storage::WAL wal{
+        "/tmp/wal-rotation.db", false /* readOnly */, false /* enableChecksums */, &vfs};
+    lbug::storage::LocalWAL localWAL(*lbug::storage::MemoryManager::Get(*conn->getClientContext()),
+        false /* enableChecksums */);
+    localWAL.logLoadExtension("dummy");
+    localWAL.logCommit();
+    uint64_t commitSequence = 0;
+    wal.logCommittedWAL(localWAL, conn->getClientContext(), commitSequence);
+    fileSystemPtr->takeEvents();
+
+    EXPECT_TRUE(wal.rotateForCheckpoint(conn->getClientContext()));
+
+    EXPECT_EQ(fileSystemPtr->takeEvents(),
+        (std::vector<std::string>{"sync-file", "rename", "sync-directory:/tmp"}));
+}
+
+TEST_F(WalTest, WALRotationDirectorySyncFailurePoisonsWAL) {
+    auto fileSystem = std::make_unique<FailingSyncFileSystem>(false, true);
+    auto* fileSystemPtr = fileSystem.get();
+    VirtualFileSystem vfs{"/tmp/wal-rotation-failure.db", std::move(fileSystem)};
+    lbug::storage::WAL wal{"/tmp/wal-rotation-failure.db", false /* readOnly */,
+        false /* enableChecksums */, &vfs};
+    lbug::storage::LocalWAL localWAL(*lbug::storage::MemoryManager::Get(*conn->getClientContext()),
+        false /* enableChecksums */);
+    localWAL.logLoadExtension("dummy");
+    localWAL.logCommit();
+    uint64_t commitSequence = 0;
+    wal.logCommittedWAL(localWAL, conn->getClientContext(), commitSequence);
+    fileSystemPtr->takeEvents();
+
+    EXPECT_THROW(wal.rotateForCheckpoint(conn->getClientContext()), RuntimeException);
+    EXPECT_THROW(wal.throwIfPoisoned(), RuntimeException);
+    EXPECT_EQ(fileSystemPtr->takeEvents(),
+        (std::vector<std::string>{"sync-file", "rename", "sync-directory:/tmp"}));
 }
 
 TEST_F(WalTest, WALRecordDeserializeSkipsUnknownTrailingBytes) {

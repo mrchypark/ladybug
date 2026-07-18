@@ -7,12 +7,16 @@
 #include "common/cast.h"
 #include "file_info.h"
 
+#define LBUG_FILE_SYSTEM_ABI_VERSION 1
+
 namespace lbug {
 namespace main {
 class ClientContext;
 } // namespace main
 
 namespace common {
+
+class VirtualFileSystem;
 
 enum class FileLockType : uint8_t { NO_LOCK = 0, READ_LOCK = 1, WRITE_LOCK = 2 };
 
@@ -45,6 +49,7 @@ struct FileOpenFlags {
 
 class LBUG_API FileSystem {
     friend struct FileInfo;
+    friend class VirtualFileSystem;
 
 public:
     FileSystem() = default;
@@ -76,6 +81,8 @@ public:
 
     virtual bool fileOrPathExists(const std::string& path, main::ClientContext* context = nullptr);
 
+    virtual bool isDirectory(const std::string& path) const;
+
     virtual std::string expandPath(main::ClientContext* context, const std::string& path) const;
 
     static std::string joinPath(const std::string& base, const std::string& part);
@@ -89,6 +96,10 @@ public:
     virtual bool canHandleFile(const std::string_view /*path*/) const { UNREACHABLE_CODE; }
 
     virtual void syncFile(const FileInfo& fileInfo) const = 0;
+
+    virtual void syncDirectory(const std::string& directoryPath) const;
+
+    virtual bool supportsDirectorySync() const { return false; }
 
     virtual bool canPerformSeek() const { return true; }
 
@@ -111,6 +122,9 @@ public:
     virtual void cleanUP(main::ClientContext* /*context*/) {}
 
 protected:
+    static bool isAllowedRemovalPath(const std::string& path, const std::string& databasePath,
+        const main::ClientContext* context);
+
     virtual void readFromFile(FileInfo& fileInfo, void* buffer, uint64_t numBytes,
         uint64_t position) const = 0;
 
@@ -130,6 +144,11 @@ protected:
     static bool isGZIPCompressed(const std::filesystem::path& path);
 
     std::string dbPath;
+
+private:
+    void bindDatabasePath(std::string path);
+
+    bool databasePathBound = false;
 };
 
 } // namespace common

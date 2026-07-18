@@ -1,5 +1,6 @@
 #include "common/file_system/virtual_file_system.h"
 
+#include <array>
 #include <cctype>
 
 #include "common/assert.h"
@@ -39,14 +40,35 @@ static std::string joinRemotePath(const std::string& base, std::string path) {
 
 VirtualFileSystem::VirtualFileSystem() : VirtualFileSystem{""} {}
 
-VirtualFileSystem::VirtualFileSystem(std::string homeDir) {
-    defaultFS = std::make_unique<LocalFileSystem>(homeDir);
+VirtualFileSystem::VirtualFileSystem(std::string homeDir)
+    : VirtualFileSystem{homeDir, std::make_unique<LocalFileSystem>(homeDir)} {}
+
+VirtualFileSystem::VirtualFileSystem(std::string homeDir,
+    std::unique_ptr<FileSystem> defaultFileSystem)
+    : defaultFS{std::move(defaultFileSystem)} {
+    if (!defaultFS) {
+        throw IOException{"The default filesystem cannot be null."};
+    }
+    bindDatabasePath(homeDir);
+    defaultFS->bindDatabasePath(std::move(homeDir));
     compressedFileSystem.emplace(FileCompressionType::GZIP, std::make_unique<GZipFileSystem>());
 }
 
 VirtualFileSystem::~VirtualFileSystem() = default;
 
 void VirtualFileSystem::registerFileSystem(std::unique_ptr<FileSystem> fileSystem) {
+    if (!fileSystem) {
+        throw IOException{"The registered filesystem cannot be null."};
+    }
+    const std::array databasePaths{dbPath, dbPath + ".wal", dbPath + ".wal.checkpoint",
+        dbPath + ".shadow", dbPath + ".tmp", dbPath + ".lock", dbPath + ".checkpoint.intent.lock",
+        dbPath + ".checkpoint.apply.lock"};
+    for (const auto& path : databasePaths) {
+        if (fileSystem->canHandleFile(path)) {
+            throw IOException{"A registered filesystem cannot claim the primary database path or "
+                              "its sidecars."};
+        }
+    }
     subSystems.push_back(std::move(fileSystem));
 }
 
@@ -82,11 +104,27 @@ std::vector<std::string> VirtualFileSystem::glob(main::ClientContext* context,
 }
 
 void VirtualFileSystem::overwriteFile(const std::string& from, const std::string& to) {
-    findFileSystem(from)->overwriteFile(from, to);
+    auto sourceFS = findFileSystem(from);
+    if (sourceFS != findFileSystem(to)) {
+        throw IOException{"Cross-filesystem overwrite is unsupported."};
+    }
+    sourceFS->overwriteFile(from, to);
 }
 
 void VirtualFileSystem::renameFile(const std::string& from, const std::string& to) {
-    defaultFS->renameFile(from, to);
+    auto sourceFS = findFileSystem(from);
+    if (sourceFS != findFileSystem(to)) {
+        throw IOException{"Cross-filesystem rename is unsupported."};
+    }
+    sourceFS->renameFile(from, to);
+}
+
+void VirtualFileSystem::copyFile(const std::string& from, const std::string& to) {
+    auto sourceFS = findFileSystem(from);
+    if (sourceFS != findFileSystem(to)) {
+        throw IOException{"Cross-filesystem copy is unsupported."};
+    }
+    sourceFS->copyFile(from, to);
 }
 
 void VirtualFileSystem::createDir(const std::string& dir) const {
@@ -95,11 +133,20 @@ void VirtualFileSystem::createDir(const std::string& dir) const {
 
 void VirtualFileSystem::removeFileIfExists(const std::string& path,
     const main::ClientContext* context) {
-    findFileSystem(path)->removeFileIfExists(path, context);
+    auto fileSystem = findFileSystem(path);
+    if (fileSystem == defaultFS.get() && !isAllowedRemovalPath(path, dbPath, context)) {
+        throw IOException{
+            "Error: Path " + path + " is not within the allowed list of files to be removed."};
+    }
+    fileSystem->removeFileIfExists(path, context);
 }
 
 bool VirtualFileSystem::fileOrPathExists(const std::string& path, main::ClientContext* context) {
     return findFileSystem(path)->fileOrPathExists(path, context);
+}
+
+bool VirtualFileSystem::isDirectory(const std::string& path) const {
+    return findFileSystem(path)->isDirectory(path);
 }
 
 std::string VirtualFileSystem::expandPath(main::ClientContext* context,
@@ -123,6 +170,14 @@ void VirtualFileSystem::writeFile(FileInfo& /*fileInfo*/, const uint8_t* /*buffe
 
 void VirtualFileSystem::syncFile(const FileInfo& fileInfo) const {
     findFileSystem(fileInfo.path)->syncFile(fileInfo);
+}
+
+void VirtualFileSystem::syncDirectory(const std::string& directoryPath) const {
+    findFileSystem(directoryPath)->syncDirectory(directoryPath);
+}
+
+bool VirtualFileSystem::supportsDirectorySync() const {
+    return defaultFS->supportsDirectorySync();
 }
 
 void VirtualFileSystem::cleanUP(main::ClientContext* context) {

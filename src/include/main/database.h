@@ -119,6 +119,13 @@ public:
      */
     LBUG_API explicit Database(std::string_view databasePath,
         SystemConfig systemConfig = SystemConfig());
+
+    /**
+     * @brief Creates a database whose primary filesystem is installed before storage opens or
+     * recovery. The database takes ownership of defaultFileSystem for its full lifetime.
+     */
+    LBUG_API Database(std::string_view databasePath, SystemConfig systemConfig,
+        std::unique_ptr<common::FileSystem> defaultFileSystem);
     /**
      * @brief Destructs the database object.
      */
@@ -184,7 +191,8 @@ private:
     };
 
     static std::unique_ptr<storage::BufferManager> initBufferManager(const Database& db);
-    void initMembers(std::string_view dbPath, construct_bm_func_t initBmFunc);
+    void initMembers(std::string_view dbPath, construct_bm_func_t initBmFunc,
+        std::unique_ptr<common::FileSystem> defaultFileSystem = nullptr);
 
     // factory method only to be used for tests
     Database(std::string_view databasePath, SystemConfig systemConfig,
@@ -195,6 +203,7 @@ private:
 private:
     std::string databasePath;
     std::unique_ptr<DBConfig> dbConfig;
+    // Declared before handle-owning components so it is destroyed after them.
     std::unique_ptr<common::VirtualFileSystem> vfs;
     std::unique_ptr<storage::BufferManager> bufferManager;
     std::unique_ptr<storage::MemoryManager> memoryManager;

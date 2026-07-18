@@ -1,12 +1,201 @@
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "common/exception/io.h"
 #include "common/file_system/virtual_file_system.h"
 #include "gtest/gtest.h"
+#include "test_helper/test_helper.h"
 
 using namespace lbug::common;
+
+namespace {
+
+class RecordingFileSystem final : public FileSystem {
+public:
+    explicit RecordingFileSystem(std::string handledPrefix = "")
+        : handledPrefix{std::move(handledPrefix)} {}
+
+    bool canHandleFile(const std::string_view path) const override {
+        return path.starts_with(handledPrefix);
+    }
+
+    std::unique_ptr<FileInfo> openFile(const std::string& path, FileOpenFlags,
+        lbug::main::ClientContext* = nullptr) override {
+        openedPaths.push_back(path);
+        return std::make_unique<FileInfo>(path, this);
+    }
+
+    std::vector<std::string> glob(lbug::main::ClientContext*, const std::string&) const override {
+        return {};
+    }
+
+    void overwriteFile(const std::string& from, const std::string& to) override {
+        overwrites.emplace_back(from, to);
+    }
+
+    void renameFile(const std::string& from, const std::string& to) override {
+        renames.emplace_back(from, to);
+    }
+
+    void copyFile(const std::string& from, const std::string& to) override {
+        copies.emplace_back(from, to);
+    }
+
+    void removeFileIfExists(const std::string& path,
+        const lbug::main::ClientContext* = nullptr) override {
+        removedPaths.push_back(path);
+    }
+
+    void syncDirectory(const std::string& path) const override {
+        syncedDirectories.push_back(path);
+    }
+
+    void syncFile(const FileInfo&) const override {}
+
+    const std::string& databasePath() const { return dbPath; }
+
+    std::vector<std::string> openedPaths;
+    std::vector<std::pair<std::string, std::string>> overwrites;
+    std::vector<std::pair<std::string, std::string>> renames;
+    std::vector<std::pair<std::string, std::string>> copies;
+    std::vector<std::string> removedPaths;
+    mutable std::vector<std::string> syncedDirectories;
+
+protected:
+    void readFromFile(FileInfo&, void*, uint64_t, uint64_t) const override { UNREACHABLE_CODE; }
+    int64_t readFile(FileInfo&, void*, size_t) const override { UNREACHABLE_CODE; }
+    int64_t seek(FileInfo&, uint64_t, int) const override { UNREACHABLE_CODE; }
+    uint64_t getFileSize(const FileInfo&) const override { return 0; }
+
+private:
+    std::string handledPrefix;
+};
+
+} // namespace
+
+TEST(VFSTests, InjectedPrimaryHandlesDefaultPathsFromConstruction) {
+    auto primary = std::make_unique<RecordingFileSystem>();
+    auto* primaryPtr = primary.get();
+
+    VirtualFileSystem vfs{"/tmp/injected.db", std::move(primary)};
+    auto file = vfs.openFile("/tmp/injected.db", FileOpenFlags{FileFlags::READ_ONLY});
+
+    ASSERT_NE(file, nullptr);
+    EXPECT_EQ(primaryPtr->openedPaths, std::vector<std::string>{"/tmp/injected.db"});
+    EXPECT_EQ(primaryPtr->databasePath(), "/tmp/injected.db");
+}
+
+TEST(VFSTests, InjectedPrimaryRejectsNullFileSystem) {
+    EXPECT_ANY_THROW(VirtualFileSystem("/tmp/injected.db", nullptr));
+}
+
+TEST(VFSTests, TwoPathOperationsDispatchOnceWhenBothPathsUseSameBackend) {
+    auto primary = std::make_unique<RecordingFileSystem>();
+    auto secondary = std::make_unique<RecordingFileSystem>("secondary://");
+    auto* secondaryPtr = secondary.get();
+    VirtualFileSystem vfs{"/tmp/injected.db", std::move(primary)};
+    vfs.registerFileSystem(std::move(secondary));
+
+    vfs.renameFile("secondary://from", "secondary://to");
+    vfs.overwriteFile("secondary://from", "secondary://to");
+    vfs.copyFile("secondary://from", "secondary://to");
+
+    const auto expectedOperation =
+        std::vector<std::pair<std::string, std::string>>{{"secondary://from", "secondary://to"}};
+    EXPECT_EQ(secondaryPtr->renames, expectedOperation);
+    EXPECT_EQ(secondaryPtr->overwrites, expectedOperation);
+    EXPECT_EQ(secondaryPtr->copies, expectedOperation);
+}
+
+TEST(VFSTests, TwoPathOperationsRejectDifferentBackendsWithoutDispatch) {
+    auto primary = std::make_unique<RecordingFileSystem>();
+    auto* primaryPtr = primary.get();
+    auto secondary = std::make_unique<RecordingFileSystem>("secondary://");
+    auto* secondaryPtr = secondary.get();
+    VirtualFileSystem vfs{"/tmp/injected.db", std::move(primary)};
+    vfs.registerFileSystem(std::move(secondary));
+
+    EXPECT_ANY_THROW(vfs.renameFile("/tmp/from", "secondary://to"));
+    EXPECT_ANY_THROW(vfs.overwriteFile("/tmp/from", "secondary://to"));
+    EXPECT_ANY_THROW(vfs.copyFile("/tmp/from", "secondary://to"));
+
+    EXPECT_TRUE(primaryPtr->renames.empty());
+    EXPECT_TRUE(primaryPtr->overwrites.empty());
+    EXPECT_TRUE(primaryPtr->copies.empty());
+    EXPECT_TRUE(secondaryPtr->renames.empty());
+    EXPECT_TRUE(secondaryPtr->overwrites.empty());
+    EXPECT_TRUE(secondaryPtr->copies.empty());
+}
+
+TEST(VFSTests, SyncDirectoryRoutesToSelectedBackend) {
+    auto primary = std::make_unique<RecordingFileSystem>();
+    auto secondary = std::make_unique<RecordingFileSystem>("secondary://");
+    auto* secondaryPtr = secondary.get();
+    VirtualFileSystem vfs{"/tmp/injected.db", std::move(primary)};
+    vfs.registerFileSystem(std::move(secondary));
+
+    vfs.syncDirectory("secondary://parent");
+
+    EXPECT_EQ(secondaryPtr->syncedDirectories, std::vector<std::string>{"secondary://parent"});
+}
+
+TEST(VFSTests, LegacyConstructorStillRoutesRegisteredSecondaryScheme) {
+    VirtualFileSystem vfs{"/tmp/legacy.db"};
+    auto secondary = std::make_unique<RecordingFileSystem>("secondary://");
+    auto* secondaryPtr = secondary.get();
+    vfs.registerFileSystem(std::move(secondary));
+
+    auto file = vfs.openFile("secondary://file", FileOpenFlags{FileFlags::READ_ONLY});
+
+    ASSERT_NE(file, nullptr);
+    EXPECT_EQ(secondaryPtr->openedPaths, std::vector<std::string>{"secondary://file"});
+}
+
+TEST(VFSTests, RegisteredSecondaryCannotClaimBoundDatabaseSidecar) {
+    auto primary = std::make_unique<RecordingFileSystem>();
+    VirtualFileSystem vfs{"/tmp/injected.db", std::move(primary)};
+    auto overlappingSecondary =
+        std::make_unique<RecordingFileSystem>("/tmp/injected.db.wal");
+
+    EXPECT_ANY_THROW(vfs.registerFileSystem(std::move(overlappingSecondary)));
+}
+
+TEST(VFSTests, InjectedPrimaryRejectsUnrelatedRemovalWithoutBackendDispatch) {
+    const auto temporaryRoot = std::filesystem::path{
+        lbug::testing::TestHelper::getTempDBPathStr("vfs_security_removal")}
+                                   .parent_path();
+    const auto unrelatedFile = temporaryRoot / "unrelated-file";
+    const auto unrelatedDirectory = temporaryRoot / "unrelated-directory";
+    std::ofstream{unrelatedFile}.put('x');
+    std::filesystem::create_directory(unrelatedDirectory);
+    auto primary = std::make_unique<RecordingFileSystem>();
+    auto* primaryPtr = primary.get();
+    VirtualFileSystem vfs{"/tmp/injected.db", std::move(primary)};
+
+    EXPECT_THROW(vfs.removeFileIfExists(unrelatedFile.string()), IOException);
+    EXPECT_THROW(vfs.removeFileIfExists(unrelatedDirectory.string()), IOException);
+
+    EXPECT_TRUE(primaryPtr->removedPaths.empty());
+    EXPECT_TRUE(std::filesystem::exists(unrelatedFile));
+    EXPECT_TRUE(std::filesystem::exists(unrelatedDirectory));
+    std::filesystem::remove_all(temporaryRoot);
+}
+
+TEST(VFSTests, RegisteredSecondaryCanRemoveItsOwnDisjointPath) {
+    auto primary = std::make_unique<RecordingFileSystem>();
+    auto secondary = std::make_unique<RecordingFileSystem>("secondary://");
+    auto* secondaryPtr = secondary.get();
+    VirtualFileSystem vfs{"/tmp/injected.db", std::move(primary)};
+    vfs.registerFileSystem(std::move(secondary));
+
+    EXPECT_NO_THROW(vfs.removeFileIfExists("secondary://owned-file"));
+
+    EXPECT_EQ(secondaryPtr->removedPaths, std::vector<std::string>{"secondary://owned-file"});
+}
 
 TEST(VFSTests, VirtualFileSystemDeleteFiles) {
     std::string homeDir = "/tmp/dbHome";

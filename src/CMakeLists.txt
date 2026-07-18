@@ -34,7 +34,7 @@ endif()
 if(TARGET lbug_shared)
         set_target_properties(lbug_shared PROPERTIES
             VERSION ${PROJECT_VERSION}
-            SOVERSION ${PROJECT_VERSION_MAJOR}
+            SOVERSION "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}"
         )
         if(WIN32)
             set_target_properties(lbug_shared PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)

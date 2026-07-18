@@ -1,5 +1,7 @@
 #include "storage/wal/wal.h"
 
+#include <filesystem>
+
 #include "common/exception/runtime.h"
 #include "common/file_system/file_info.h"
 #include "common/file_system/virtual_file_system.h"
@@ -67,7 +69,22 @@ bool WAL::rotateForCheckpoint(main::ClientContext* /*context*/) {
         fileInfo.reset();
         serializer.reset();
     }
-    vfs->renameFile(walPath, checkpointWalPath);
+    try {
+        vfs->renameFile(walPath, checkpointWalPath);
+        auto parentDirectory = std::filesystem::path{walPath}.parent_path();
+        vfs->syncDirectory(parentDirectory.empty() ? "." : parentDirectory.string());
+    } catch (const std::exception& e) {
+        poisonNoLock(e.what());
+        throw RuntimeException(
+            "WAL checkpoint rotation failed; database is in a panic state and refuses further "
+            "writes until restart. Original error: " +
+            std::string{e.what()});
+    } catch (...) {
+        poisonNoLock("unknown exception");
+        throw RuntimeException(
+            "WAL checkpoint rotation failed; database is in a panic state and refuses further "
+            "writes until restart. Original error: unknown exception");
+    }
     return true;
 }
 

@@ -48,9 +48,21 @@ public:
 
     bool fileOrPathExists(const std::string& path, main::ClientContext* context = nullptr) override;
 
+    bool isDirectory(const std::string& path) const override;
+
     std::string expandPath(main::ClientContext* context, const std::string& path) const override;
 
     void syncFile(const FileInfo& fileInfo) const override;
+
+    void syncDirectory(const std::string& directoryPath) const override;
+
+    bool supportsDirectorySync() const override {
+#if defined(__EMSCRIPTEN__)
+        return false;
+#else
+        return true;
+#endif
+    }
 
     static bool isLocalPath(const std::string& path);
 
