@@ -530,6 +530,10 @@ inline T abs(T value) {
 template<typename T>
     requires std::is_signed_v<T>
 inline T abs(T value) {
+    // New writers reject this value, but readers must preserve the legacy bit width.
+    if (value == std::numeric_limits<T>::min()) {
+        return value;
+    }
     return std::abs(value);
 }
 
@@ -609,6 +613,11 @@ bool IntegerBitpacking<T>::canUpdateInPlace(std::span<const T> values,
         CompressionMetadata(StorageValue(std::min(metadata.min.get<T>(), min->template get<T>())),
             StorageValue(std::max(metadata.max.get<T>(), max->template get<T>())),
             metadata.compression);
+    if constexpr (std::signed_integral<T>) {
+        if (newMetadata.min.get<T>() == std::numeric_limits<T>::min()) {
+            return false;
+        }
+    }
     auto newInfo = getPackingInfo(newMetadata);
 
     if (info.bitWidth != newInfo.bitWidth || info.hasNegative != newInfo.hasNegative ||

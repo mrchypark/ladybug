@@ -112,6 +112,12 @@ ColumnChunkMetadata GetBitpackingMetadata::operator()(std::span<const uint8_t> /
         TypeUtils::visit(
             dataType.getPhysicalType(),
             [&]<IntegerBitpackingType T>(T) {
+                if constexpr (std::signed_integral<T>) {
+                    if (compMeta.min.get<T>() == std::numeric_limits<T>::min()) {
+                        compMeta = CompressionMetadata(min, max, CompressionType::UNCOMPRESSED);
+                        return;
+                    }
+                }
                 // If integer bitpacking bitwidth is the maximum, bitpacking cannot be used
                 // and has poor performance compared to uncompressed
                 if (IntegerBitpacking<T>::getPackingInfo(compMeta).bitWidth >= sizeof(T) * 8) {

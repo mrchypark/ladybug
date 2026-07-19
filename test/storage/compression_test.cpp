@@ -302,6 +302,54 @@ TEST(CompressionTests, IntegerPackingTest64SetValuesFromUncompressed) {
     }
 }
 
+TEST(CompressionTests, IntegerPackingTest64MinFallsBackWithoutCorruption) {
+    const std::vector<int64_t> src{std::numeric_limits<int64_t>::min(), 0};
+    const auto dataType = LogicalType::INT64();
+    auto alg = std::make_shared<IntegerBitpacking<int64_t>>();
+    const auto metadata = GetCompressionMetadata(alg,
+        dataType)(std::span<const uint8_t>{reinterpret_cast<const uint8_t*>(src.data()),
+                      src.size() * sizeof(int64_t)},
+        src.size(), StorageValue(src.front()), StorageValue(src.back()));
+
+    EXPECT_EQ(metadata.compMeta.compression, CompressionType::UNCOMPRESSED);
+
+    std::vector<uint8_t> page(LBUG_PAGE_SIZE);
+    const auto* srcCursor = reinterpret_cast<const uint8_t*>(src.data());
+    alg->compressNextPage(srcCursor, src.size(), page.data(), page.size(), metadata.compMeta);
+
+    std::vector<int64_t> decompressed(src.size());
+    PageCursor cursor{0, 0};
+    ReadCompressedValuesFromPage{dataType}(page.data(), cursor,
+        reinterpret_cast<uint8_t*>(decompressed.data()), 0, decompressed.size(), metadata.compMeta);
+    EXPECT_THAT(decompressed, ::testing::ContainerEq(src));
+}
+
+TEST(CompressionTests, IntegerPackingTest64UpdateToMinRequiresRecompression) {
+    const CompressionMetadata metadata{StorageValue(int64_t{-1}), StorageValue(int64_t{1}),
+        CompressionType::INTEGER_BITPACKING};
+    const std::vector<int64_t> values{std::numeric_limits<int64_t>::min()};
+
+    EXPECT_FALSE(IntegerBitpacking<int64_t>::canUpdateInPlace(values, metadata));
+}
+
+TEST(CompressionTests, IntegerPackingTest64LegacyMinMetadataPageRemainsReadable) {
+    const auto min = std::numeric_limits<int64_t>::min();
+    const CompressionMetadata metadata{StorageValue(min), StorageValue(int64_t{0}),
+        CompressionType::INTEGER_BITPACKING};
+    const auto info = IntegerBitpacking<int64_t>::getPackingInfo(metadata);
+    ASSERT_EQ(info.bitWidth, 1);
+    ASSERT_TRUE(info.hasNegative);
+    ASSERT_EQ(info.offset, 0);
+
+    std::vector<uint8_t> legacyPage(LBUG_PAGE_SIZE);
+    legacyPage[0] = 0b10;
+    std::vector<int64_t> decompressed(2);
+    IntegerBitpacking<int64_t>().decompressFromPage(legacyPage.data(), 0,
+        reinterpret_cast<uint8_t*>(decompressed.data()), 0, decompressed.size(), metadata);
+
+    EXPECT_THAT(decompressed, ::testing::ElementsAre(0, -1));
+}
+
 TEST(CompressionTests, IntegerPackingTest128WorksOnNonZeroBuffer) {
     std::vector<int128_t> src(128);
     for (size_t i = 0; i < src.size(); ++i) {
